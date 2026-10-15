@@ -30,8 +30,9 @@ class _BleImuAppState extends State<BleImuApp> {
   final List<BleDevice> _scannedDevices = [];
 
   QuaternionSample? _latestSample;
+  RawImuSample? _latestRawSample;
   DeviceStatus? _latestStatus;
-
+  int _invalidRawPacketCount = 0;
   // Chart buffers
   final List<double> _rollHistory = [];
   final List<double> _pitchHistory = [];
@@ -68,6 +69,22 @@ class _BleImuAppState extends State<BleImuApp> {
             if (_yawHistory.length > _maxDataPoints) _yawHistory.removeAt(0);
           });
         }
+      } else if (char == BleUuids.rawImuChar.toLowerCase()) {
+        final sample = RawImuSample.decode(value);
+
+        if (sample == null) {
+          setState(() => _invalidRawPacketCount++);
+          return;
+        }
+
+        final previous = _latestRawSample;
+        if (previous != null &&
+            previous.version == sample.version &&
+            !sample.isNewerThan(previous)) {
+          return;
+        }
+
+        setState(() => _latestRawSample = sample);
       } else if (char == BleUuids.statusChar.toLowerCase()) {
         final status = DeviceStatus.decode(value);
         if (status != null) {
@@ -81,6 +98,7 @@ class _BleImuAppState extends State<BleImuApp> {
         setState(() {
           _connectedDevice = null;
           _latestSample = null;
+          _latestRawSample = null;
         });
       }
     };
@@ -144,6 +162,15 @@ Future<void> _startScan() async {
       BleInputProperty.notification,
     );
 
+    //1.1 Subscribe to Raw IMU Stream (IMU Service)
+    await UniversalBle.setNotifiable(
+      device.deviceId,
+      BleUuids.imuService,
+      BleUuids.rawImuChar,
+      BleInputProperty.notification,
+    );
+
+
     // 2. Subscribe to Device Status Stream
     await UniversalBle.setNotifiable(
       device.deviceId,
@@ -166,7 +193,11 @@ Future<void> _startScan() async {
   Future<void> _disconnect() async {
     if (_connectedDevice != null) {
       await UniversalBle.disconnect(_connectedDevice!.deviceId);
-      setState(() => _connectedDevice = null);
+      setState(() {
+        _connectedDevice = null;
+        _latestSample = null;
+        _latestRawSample = null;
+      });
     }
   }
 
@@ -243,6 +274,7 @@ Future<void> _startScan() async {
 
   Widget _buildDashboard() {
     final quat = _latestSample;
+    final raw = _latestRawSample;
     final status = _latestStatus;
 
     return LayoutBuilder(builder: (context, constraints) {
@@ -332,6 +364,163 @@ Future<void> _startScan() async {
               ),
             ),
           ),
+          Card(
+            color: const Color.fromARGB(255, 125, 142, 189),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.sensors, size: 18),
+                      SizedBox(width: 8),
+                      Text(
+                        "Raw ICM-20948 Data",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    "Native raw sensor stream; not DMP quaternion data.",
+                    style: TextStyle(
+                      color: Colors.white60,
+                      fontSize: 11,
+                    ),
+                  ),
+                  const Divider(),
+                  if (raw == null)
+                    const Text("Waiting for raw IMU notifications...")
+                  else ...[
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        Chip(label: Text("Raw v${raw.version}")),
+                        Chip(label: Text("Sequence ${raw.sequence}")),
+                        Chip(label: Text("${raw.timestampMs} ms")),
+                        if (raw.measuredRateHz != null)
+                          Chip(label: Text("${raw.measuredRateHz} Hz")),
+                        if (raw.flags.dmpActive)
+                          const Chip(
+                            avatar: Icon(Icons.sync, size: 16),
+                            label: Text("DMP concurrently active"),
+                          ),
+                      ],
+                    ),
+                    if (!raw.flags.sampleValid)
+                      const _RawWarning(
+                        text: "Raw sample is marked invalid",
+                      ),
+                    if (raw.flags.magnetometerOverflow)
+                      const _RawWarning(
+                        text: "Magnetometer overflow",
+                      ),
+                    const SizedBox(height: 8),
+                    Text(
+                      "Accelerometer ${raw.accelerometerRange}",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    Text(
+                      raw.flags.accelerometerValid
+                          ? "X ${raw.accelerometerXG.toStringAsFixed(4)} g   "
+                              "Y ${raw.accelerometerYG.toStringAsFixed(4)} g   "
+                              "Z ${raw.accelerometerZG.toStringAsFixed(4)} g"
+                          : "Accelerometer data marked invalid",
+                      style: TextStyle(
+                        fontFamily: "monospace",
+                        color: raw.flags.accelerometerValid
+                            ? Colors.white
+                            : Colors.amber,
+                      ),
+                    ),
+                    Text(
+                      "Counts: ${raw.accelerometerX}, "
+                      "${raw.accelerometerY}, ${raw.accelerometerZ}",
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontFamily: "monospace",
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      "Gyroscope ${raw.gyroscopeRange}",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    Text(
+                      raw.flags.gyroscopeValid
+                          ? "X ${raw.gyroscopeXDps.toStringAsFixed(3)} °/s   "
+                              "Y ${raw.gyroscopeYDps.toStringAsFixed(3)} °/s   "
+                              "Z ${raw.gyroscopeZDps.toStringAsFixed(3)} °/s"
+                          : "Gyroscope data marked invalid",
+                      style: TextStyle(
+                        fontFamily: "monospace",
+                        color: raw.flags.gyroscopeValid
+                            ? Colors.white
+                            : Colors.amber,
+                      ),
+                    ),
+                    Text(
+                      "Counts: ${raw.gyroscopeX}, "
+                      "${raw.gyroscopeY}, ${raw.gyroscopeZ}",
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontFamily: "monospace",
+                        fontSize: 11,
+                      ),
+                    ),
+                    if (raw.version == 1) ...[
+                      const SizedBox(height: 10),
+                      const Text(
+                        "Magnetometer",
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      Text(
+                        raw.flags.magnetometerValid
+                            ? "X ${raw.magnetometerX}   "
+                                "Y ${raw.magnetometerY}   "
+                                "Z ${raw.magnetometerZ} counts"
+                            : "Magnetometer data marked invalid",
+                        style: TextStyle(
+                          fontFamily: "monospace",
+                          color: raw.flags.magnetometerValid
+                              ? Colors.white
+                              : Colors.amber,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        raw.flags.temperatureValid
+                            ? "Internal temperature: ${raw.temperature} counts"
+                            : "Internal temperature data marked invalid",
+                        style: TextStyle(
+                          fontFamily: "monospace",
+                          color: raw.flags.temperatureValid
+                              ? Colors.white
+                              : Colors.amber,
+                        ),
+                      ),
+                    ],
+                  ],
+                  if (_invalidRawPacketCount > 0) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      "Rejected raw packets: $_invalidRawPacketCount",
+                      style: const TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
           ControlPanel(
             onSendCommand: _sendCommand,
             commandHistory: _commandHistory,
@@ -353,5 +542,36 @@ Future<void> _startScan() async {
               ],
             );
     });
+  }
+}
+
+class _RawWarning extends StatelessWidget {
+  final String text;
+
+  const _RawWarning({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade900,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

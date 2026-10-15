@@ -4,6 +4,7 @@ import 'dart:typed_data';
 class BleUuids {
   static const String imuService = "8f7c0001-4f54-4d55-8000-5849414f494d";
   static const String quaternionChar = "8f7c0002-4f54-4d55-8000-5849414f494d";
+  static const String rawImuChar = "8f7c0099-4f54-4d55-8000-5849414f494d";
 
   static const String deviceStatusService = "8f7c0020-4f54-4d55-8000-5849414f494d";
   static const String statusChar = "8f7c0021-4f54-4d55-8000-5849414f494d";
@@ -133,6 +134,198 @@ class QuaternionSample {
     return null;
   }
 }
+
+class RawImuFlags {
+  final int raw;
+  final int version;
+
+  const RawImuFlags(this.raw, this.version);
+
+  bool get sampleValid => (raw & 0x01) != 0;
+  bool get accelerometerValid => (raw & 0x02) != 0;
+  bool get gyroscopeValid => (raw & 0x04) != 0;
+
+  bool get magnetometerValid => version == 1 && (raw & 0x08) != 0;
+  bool get temperatureValid => version == 1 && (raw & 0x10) != 0;
+  bool get magnetometerOverflow => version == 1 && (raw & 0x20) != 0;
+
+  bool get dmpActive =>
+      version == 1 ? (raw & 0x40) != 0 : (raw & 0x08) != 0;
+}
+class RawImuSample {
+  static const List<double> _accelerometerSensitivity = [
+    16384.0,
+    8192.0,
+    4096.0,
+    2048.0,
+  ];
+
+  static const List<double> _gyroscopeSensitivity = [
+    131.0,
+    65.5,
+    32.8,
+    16.4,
+  ];
+
+  final int version;
+  final RawImuFlags flags;
+  final int accelerometerRangeCode;
+  final int gyroscopeRangeCode;
+  final int sequence;
+  final int timestampMs;
+
+  final int accelerometerX;
+  final int accelerometerY;
+  final int accelerometerZ;
+
+  final int gyroscopeX;
+  final int gyroscopeY;
+  final int gyroscopeZ;
+
+  final int? magnetometerX;
+  final int? magnetometerY;
+  final int? magnetometerZ;
+  final int? temperature;
+  final int? measuredRateHz;
+
+  const RawImuSample({
+    required this.version,
+    required this.flags,
+    required this.accelerometerRangeCode,
+    required this.gyroscopeRangeCode,
+    required this.sequence,
+    required this.timestampMs,
+    required this.accelerometerX,
+    required this.accelerometerY,
+    required this.accelerometerZ,
+    required this.gyroscopeX,
+    required this.gyroscopeY,
+    required this.gyroscopeZ,
+    this.magnetometerX,
+    this.magnetometerY,
+    this.magnetometerZ,
+    this.temperature,
+    this.measuredRateHz,
+  });
+
+  double get accelerometerSensitivity =>
+      _accelerometerSensitivity[accelerometerRangeCode];
+
+  double get gyroscopeSensitivity =>
+      _gyroscopeSensitivity[gyroscopeRangeCode];
+
+  double get accelerometerXG =>
+      accelerometerX / accelerometerSensitivity;
+  double get accelerometerYG =>
+      accelerometerY / accelerometerSensitivity;
+  double get accelerometerZG =>
+      accelerometerZ / accelerometerSensitivity;
+
+  double get gyroscopeXDps =>
+      gyroscopeX / gyroscopeSensitivity;
+  double get gyroscopeYDps =>
+      gyroscopeY / gyroscopeSensitivity;
+  double get gyroscopeZDps =>
+      gyroscopeZ / gyroscopeSensitivity;
+
+  String get accelerometerRange {
+    const values = ["±2 g", "±4 g", "±8 g", "±16 g"];
+    return values[accelerometerRangeCode];
+  }
+
+  String get gyroscopeRange {
+    const values = ["±250 dps", "±500 dps", "±1000 dps", "±2000 dps"];
+    return values[gyroscopeRangeCode];
+  }
+
+  /// Wrap-aware comparison for packets of the same version.
+  /// Timestamp is used if sequence values are equal.
+  bool isNewerThan(RawImuSample previous) {
+    final sequenceBits = version == 2 ? 16 : 32;
+    final sequenceMask = version == 2 ? 0xFFFF : 0xFFFFFFFF;
+    final halfRange = version == 2 ? 0x8000 : 0x80000000;
+
+    final difference = (sequence - previous.sequence) & sequenceMask;
+    if (difference != 0) {
+      return difference < halfRange;
+    }
+
+    final timestampDifference =
+        (timestampMs - previous.timestampMs) & 0xFFFFFFFF;
+    return timestampDifference != 0 && timestampDifference < 0x80000000;
+  }
+
+  static RawImuSample? decode(Uint8List bytes) {
+    if (bytes.isEmpty) return null;
+
+    final version = bytes[0];
+
+    if (version == 1) {
+      if (bytes.length != 36) return null;
+
+      final data = ByteData.sublistView(bytes);
+      final rawFlags = data.getUint8(1);
+      final accelerometerRangeCode = data.getUint8(2);
+      final gyroscopeRangeCode = data.getUint8(3);
+
+      // Bit 7 is reserved in Full Raw v1.
+      if ((rawFlags & 0x80) != 0) return null;
+
+      // Firmware currently defines only range codes 0 through 3.
+      if (accelerometerRangeCode > 3 || gyroscopeRangeCode > 3) {
+        return null;
+      }
+
+      // Reserved field must be zero for this protocol version.
+      if (data.getUint16(34, Endian.little) != 0) return null;
+
+      return RawImuSample(
+        version: 1,
+        flags: RawImuFlags(rawFlags, 1),
+        accelerometerRangeCode: accelerometerRangeCode,
+        gyroscopeRangeCode: gyroscopeRangeCode,
+        sequence: data.getUint32(4, Endian.little),
+        timestampMs: data.getUint32(8, Endian.little),
+        accelerometerX: data.getInt16(12, Endian.little),
+        accelerometerY: data.getInt16(14, Endian.little),
+        accelerometerZ: data.getInt16(16, Endian.little),
+        gyroscopeX: data.getInt16(18, Endian.little),
+        gyroscopeY: data.getInt16(20, Endian.little),
+        gyroscopeZ: data.getInt16(22, Endian.little),
+        magnetometerX: data.getInt16(24, Endian.little),
+        magnetometerY: data.getInt16(26, Endian.little),
+        magnetometerZ: data.getInt16(28, Endian.little),
+        temperature: data.getInt16(30, Endian.little),
+        measuredRateHz: data.getUint16(32, Endian.little),
+      );
+    }
+
+    if (version == 2) {
+      if (bytes.length != 20) return null;
+
+      final data = ByteData.sublistView(bytes);
+      final rawFlags = data.getUint8(1);
+
+      return RawImuSample(
+        version: 2,
+        flags: RawImuFlags(rawFlags, 2),
+        accelerometerRangeCode: (rawFlags & 0x30) >> 4,
+        gyroscopeRangeCode: (rawFlags & 0xC0) >> 6,
+        sequence: data.getUint16(2, Endian.little),
+        timestampMs: data.getUint32(4, Endian.little),
+        accelerometerX: data.getInt16(8, Endian.little),
+        accelerometerY: data.getInt16(10, Endian.little),
+        accelerometerZ: data.getInt16(12, Endian.little),
+        gyroscopeX: data.getInt16(14, Endian.little),
+        gyroscopeY: data.getInt16(16, Endian.little),
+        gyroscopeZ: data.getInt16(18, Endian.little),
+      );
+    }
+
+    return null;
+  }
+}
+
 
 /// Device Status Packet Data
 class DeviceStatus {
