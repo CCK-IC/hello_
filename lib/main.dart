@@ -29,7 +29,7 @@ class _BleImuAppState extends State<BleImuApp> {
   bool _isScanning = false;
   final List<BleDevice> _scannedDevices = [];
 
-  QuaternionSample? _latestSample;
+  // QuaternionSample? _latestSample;
   RawImuSample? _latestRawSample;
   DeviceStatus? _latestStatus;
   int _invalidRawPacketCount = 0;
@@ -56,20 +56,21 @@ class _BleImuAppState extends State<BleImuApp> {
 
     UniversalBle.onValueChange = (deviceId, characteristicId, value,Null) {//timestamp is optional and can be null
       final char = characteristicId.toLowerCase();
-      if (char == BleUuids.quaternionChar.toLowerCase()) {
-        final sample = QuaternionSample.decode(value);
-        if (sample != null) {
-          setState(() {
-            _latestSample = sample;
-            _rollHistory.add(sample.roll);
-            _pitchHistory.add(sample.pitch);
-            _yawHistory.add(sample.yaw);
-            if (_rollHistory.length > _maxDataPoints) _rollHistory.removeAt(0);
-            if (_pitchHistory.length > _maxDataPoints) _pitchHistory.removeAt(0);
-            if (_yawHistory.length > _maxDataPoints) _yawHistory.removeAt(0);
-          });
-        }
-      } else if (char == BleUuids.rawImuChar.toLowerCase()) {
+      // if (char == BleUuids.quaternionChar.toLowerCase()) {
+      //   final sample = QuaternionSample.decode(value);
+      //   if (sample != null) {
+      //     setState(() {
+      //       _latestSample = sample;
+      //       _rollHistory.add(sample.roll);
+      //       _pitchHistory.add(sample.pitch);
+      //       _yawHistory.add(sample.yaw);
+      //       if (_rollHistory.length > _maxDataPoints) _rollHistory.removeAt(0);
+      //       if (_pitchHistory.length > _maxDataPoints) _pitchHistory.removeAt(0);
+      //       if (_yawHistory.length > _maxDataPoints) _yawHistory.removeAt(0);
+      //     });
+      //   }
+      // } else if (char == BleUuids.rawImuChar.toLowerCase()) {
+      if (char == BleUuids.rawImuChar.toLowerCase()) {
         final sample = RawImuSample.decode(value);
 
         if (sample == null) {
@@ -97,7 +98,7 @@ class _BleImuAppState extends State<BleImuApp> {
       if (!isConnected && _connectedDevice?.deviceId == deviceId) {
         setState(() {
           _connectedDevice = null;
-          _latestSample = null;
+          // _latestSample = null;
           _latestRawSample = null;
         });
       }
@@ -155,12 +156,12 @@ Future<void> _startScan() async {
     await Future.delayed(const Duration(milliseconds: 200));
 
     // 1. Subscribe to Quaternion Stream (IMU Service)
-    await UniversalBle.setNotifiable(
-      device.deviceId,
-      BleUuids.imuService,
-      BleUuids.quaternionChar,
-      BleInputProperty.notification,
-    );
+    // await UniversalBle.setNotifiable(
+    //   device.deviceId,
+    //   BleUuids.imuService,
+    //   BleUuids.quaternionChar,
+    //   BleInputProperty.notification,
+    // );
 
     //1.1 Subscribe to Raw IMU Stream (IMU Service)
     await UniversalBle.setNotifiable(
@@ -195,7 +196,7 @@ Future<void> _startScan() async {
       await UniversalBle.disconnect(_connectedDevice!.deviceId);
       setState(() {
         _connectedDevice = null;
-        _latestSample = null;
+        // _latestSample = null;
         _latestRawSample = null;
       });
     }
@@ -273,72 +274,72 @@ Future<void> _startScan() async {
   }
 
   Widget _buildDashboard() {
-    final quat = _latestSample;
+    // final quat = _latestSample;
     final raw = _latestRawSample;
     final status = _latestStatus;
 
     return LayoutBuilder(builder: (context, constraints) {
       final isWide = constraints.maxWidth > 800;
 
-      final visualizationColumn = Column(
-        children: [
-          // Warnings Banner (Synthetic / Degraded indicator)
-          if (quat?.flags.isSynthetic == true || quat?.flags.isDegraded == true)
-            Container(
-              padding: const EdgeInsets.all(8),
-              margin: const EdgeInsets.symmetric(vertical: 4),
-              color: Colors.amber.shade900,
-              child: Row(
-                children: [
-                  const Icon(Icons.warning, color: Colors.white),
-                  const SizedBox(width: 8),
-                  Text(
-                    quat!.flags.isSynthetic ? "WARNING: Synthetic fallback data" : "WARNING: Degraded Mode",
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ),
+      // final visualizationColumn = Column(
+      //   children: [
+      //     // Warnings Banner (Synthetic / Degraded indicator)
+      //     if (quat?.flags.isSynthetic == true || quat?.flags.isDegraded == true)
+      //       Container(
+      //         padding: const EdgeInsets.all(8),
+      //         margin: const EdgeInsets.symmetric(vertical: 4),
+      //         color: Colors.amber.shade900,
+      //         child: Row(
+      //           children: [
+      //             const Icon(Icons.warning, color: Colors.white),
+      //             const SizedBox(width: 8),
+      //             Text(
+      //               quat!.flags.isSynthetic ? "WARNING: Synthetic fallback data" : "WARNING: Degraded Mode",
+      //               style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+      //             ),
+      //           ],
+      //         ),
+      //       ),
 
-          // 3D Canvas
-          Expanded(
-            flex: 5,
-            child: Card(
-              color: const Color.fromARGB(235, 159, 160, 163),
-              child: Stack(
-                children: [
-                  Imu3dView(
-                    q0: quat?.w ?? 1.0,
-                    q1: quat?.x ?? 0.0,
-                    q2: quat?.y ?? 0.0,
-                    q3: quat?.z ?? 0.0,
-                  ),
-                  Positioned(
-                    top: 10,
-                    left: 10,
-                    child: Text(
-                      "Roll: ${quat?.roll.toStringAsFixed(1)}°\n"
-                      "Pitch: ${quat?.pitch.toStringAsFixed(1)}°\n"
-                      "Yaw: ${quat?.yaw.toStringAsFixed(1)}°",
-                      style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+      //     // 3D Canvas
+      //     Expanded(
+      //       flex: 5,
+      //       child: Card(
+      //         color: const Color.fromARGB(235, 159, 160, 163),
+      //         child: Stack(
+      //           children: [
+      //             Imu3dView(
+      //               q0: quat?.w ?? 1.0,
+      //               q1: quat?.x ?? 0.0,
+      //               q2: quat?.y ?? 0.0,
+      //               q3: quat?.z ?? 0.0,
+      //             ),
+      //             Positioned(
+      //               top: 10,
+      //               left: 10,
+      //               child: Text(
+      //                 "Roll: ${quat?.roll.toStringAsFixed(1)}°\n"
+      //                 "Pitch: ${quat?.pitch.toStringAsFixed(1)}°\n"
+      //                 "Yaw: ${quat?.yaw.toStringAsFixed(1)}°",
+      //                 style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold),
+      //               ),
+      //             ),
+      //           ],
+      //         ),
+      //       ),
+      //     ),
 
-          // Realtime Euler Angle Plot
-          Expanded(
-            flex: 4,
-            child: EulerChart(
-              rollHistory: _rollHistory,
-              pitchHistory: _pitchHistory,
-              yawHistory: _yawHistory,
-            ),
-          ),
-        ],
-      );
+      //     // Realtime Euler Angle Plot
+      //     Expanded(
+      //       flex: 4,
+      //       child: EulerChart(
+      //         rollHistory: _rollHistory,
+      //         pitchHistory: _pitchHistory,
+      //         yawHistory: _yawHistory,
+      //       ),
+      //     ),
+      //   ],
+      // );
 
       final statusAndControlsColumn = ListView(
         children: [
@@ -531,13 +532,13 @@ Future<void> _startScan() async {
       return isWide
           ? Row(
               children: [
-                Expanded(flex: 3, child: visualizationColumn),
+                // Expanded(flex: 3, child: visualizationColumn),
                 Expanded(flex: 2, child: statusAndControlsColumn),
               ],
             )
           : Column(
               children: [
-                Expanded(flex: 6, child: visualizationColumn),
+                // Expanded(flex: 6, child: visualizationColumn),
                 Expanded(flex: 4, child: statusAndControlsColumn),
               ],
             );
