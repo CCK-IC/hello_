@@ -48,14 +48,26 @@ class _BleImuAppState extends State<BleImuApp> {
   }
 
   void _initBle() {
+    UniversalBle.queueType = QueueType.none;
     UniversalBle.onScanResult = (device) {
       if (!_scannedDevices.any((d) => d.deviceId == device.deviceId)) {
         setState(() => _scannedDevices.add(device));
       }
     };
 
-    UniversalBle.onValueChange = (deviceId, characteristicId, value,Null) {//timestamp is optional and can be null
-      final char = characteristicId.toLowerCase();
+    //  Best Practice: Push data straight into a stream controller or separate isolate
+    // final _bleDataController = StreamController<({String deviceId, String characteristicId, Uint8List value})>();
+    final _bleDataController = StreamController<BleCharacteristicValue >();
+
+    UniversalBle.onValueChange = (BleCharacteristicValue update) {//timestamp is optional and can be null
+      // _bleDataController.sink.add( characteristicId: update.characteristicId, deviceId: update.deviceId,value: update.value);
+      _bleDataController.sink.add( update);
+    };
+
+    // Listen and process elsewhere (or use an isolate for parsing heavy packets)
+    _bleDataController.stream.listen((data) {
+      // Execute parsing / state mutations here
+      final char = data.characteristicId.toLowerCase();
       // if (char == BleUuids.quaternionChar.toLowerCase()) {
       //   final sample = QuaternionSample.decode(value);
       //   if (sample != null) {
@@ -71,7 +83,7 @@ class _BleImuAppState extends State<BleImuApp> {
       //   }
       // } else if (char == BleUuids.rawImuChar.toLowerCase()) {
       if (char == BleUuids.rawImuChar.toLowerCase()) {
-        final sample = RawImuSample.decode(value);
+        final sample = RawImuSample.decode(data.value);
 
         if (sample == null) {
           setState(() => _invalidRawPacketCount++);
@@ -87,15 +99,16 @@ class _BleImuAppState extends State<BleImuApp> {
 
         setState(() => _latestRawSample = sample);
       } else if (char == BleUuids.statusChar.toLowerCase()) {
-        final status = DeviceStatus.decode(value);
+        final status = DeviceStatus.decode(data.value);
         if (status != null) {
           setState(() => _latestStatus = status);
         }
       }
-    };
+    });
 
-    UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
-      if (!isConnected && _connectedDevice?.deviceId == deviceId) {
+    // UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
+    UniversalBle.onConnectionChange = (BleConnectionChange change) {
+      if (!change.isConnected && _connectedDevice?.deviceId == change.deviceId) {
         setState(() {
           _connectedDevice = null;
           // _latestSample = null;
@@ -164,22 +177,33 @@ Future<void> _startScan() async {
     // );
 
     //1.1 Subscribe to Raw IMU Stream (IMU Service)
-    await UniversalBle.setNotifiable(
+    // await UniversalBle.setNotifiable(
+    //   device.deviceId,
+    //   BleUuids.imuService,
+    //   BleUuids.rawImuChar,
+    //   BleInputProperty.notification,
+    // );
+    await UniversalBle.subscribeNotifications(
       device.deviceId,
       BleUuids.imuService,
-      BleUuids.rawImuChar,
-      BleInputProperty.notification,
-    );
+      BleUuids.rawImuChar
+    ).timeout(const Duration(seconds: 5));
 
 
     // 2. Subscribe to Device Status Stream
-    await UniversalBle.setNotifiable(
+    // await UniversalBle.setNotifiable(
+    //   device.deviceId,
+    //   BleUuids.deviceStatusService,
+    //   BleUuids.statusChar,
+    //   BleInputProperty.notification,
+    // );
+    await UniversalBle.subscribeNotifications(
       device.deviceId,
       BleUuids.deviceStatusService,
-      BleUuids.statusChar,
-      BleInputProperty.notification,
+      BleUuids.statusChar
     );
   } catch (e) {
+    if (!mounted) return;
     debugPrint("Connection or Subscription Error: $e");
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -206,12 +230,18 @@ Future<void> _startScan() async {
     if (_connectedDevice == null) throw Exception("Device not connected");
     final payload = cmd.serialize();
 
-    await UniversalBle.writeValue(
+    // await UniversalBle.writeValue(
+    //   _connectedDevice!.deviceId,
+    //   BleUuids.deviceStatusService,
+    //   BleUuids.controlChar,
+    //   payload,
+    //   BleOutputProperty.withResponse,
+    // );
+    await UniversalBle.write(
       _connectedDevice!.deviceId,
       BleUuids.deviceStatusService,
       BleUuids.controlChar,
-      payload,
-      BleOutputProperty.withResponse,
+      payload
     );
 
     setState(() {

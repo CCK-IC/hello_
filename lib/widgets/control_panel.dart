@@ -23,6 +23,7 @@ class _ControlPanelState extends State<ControlPanel> {
   void _send(BleControlCommand cmd) async {
     try {
       await widget.onSendCommand(cmd);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Sent: ${cmd.name}"), duration: const Duration(seconds: 1)),
       );
