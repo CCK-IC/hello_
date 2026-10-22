@@ -1,9 +1,15 @@
-import 'dart:async';
+import "dart:async";
+import "dart:convert";
+import "dart:typed_data";
+
+import "package:file_saver/file_saver.dart";
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:universal_ble/universal_ble.dart';
 
-import 'models/protocol.dart';
+import "models/raw_imu_history.dart";
+import "models/protocol.dart";
+import "widgets/raw_imu_chart.dart";
 import 'widgets/imu_3d_view.dart';
 import 'widgets/euler_chart.dart';
 import 'widgets/control_panel.dart';
@@ -25,9 +31,37 @@ class BleImuApp extends StatefulWidget {
 }
 
 class _BleImuAppState extends State<BleImuApp> {
+  static const Duration _normalConnectionTimeout = Duration(seconds: 20);
+  static const Duration _windowsConnectionTimeout = Duration(seconds: 45);
+  static const Duration _windowsGattDelay = Duration(milliseconds: 350);
+  static const Duration _normalGattDelay = Duration(milliseconds: 80);
+
   BleDevice? _connectedDevice;
   bool _isScanning = false;
   final List<BleDevice> _scannedDevices = [];
+
+  Completer<void>? _connectionCompleter;
+  bool _connecting = false;
+  String? _connectionError;
+
+  final Map<String, bool> _enabledStreams = {
+    "quaternion": true,
+    "rawImu": true,
+    "auxiliary": false,
+    "status": true,
+  };
+
+  final List<RawImuHistoryPoint> _rawHistory = [];
+  static const Duration _rawHistoryRetention = Duration(minutes: 10);
+
+  RawSensorType _selectedRawSensor = RawSensorType.accelerometer;
+  Duration _rawChartPeriod = const Duration(seconds: 10);
+
+  bool _recordingRawCsv = false;
+  Duration _rawRecordingPeriod = const Duration(seconds: 10);
+  DateTime? _rawRecordingStartedAt;
+  Timer? _rawRecordingTimer;
+  final List<RawImuHistoryPoint> _rawRecording = [];
 
   // QuaternionSample? _latestSample;
   RawImuSample? _latestRawSample;
@@ -97,7 +131,25 @@ class _BleImuAppState extends State<BleImuApp> {
           return;
         }
 
-        setState(() => _latestRawSample = sample);
+        final point = RawImuHistoryPoint(
+          receivedAt: DateTime.now(),
+          sample: sample,
+        );
+
+        setState(() {
+          _latestRawSample = sample;
+          _rawHistory.add(point);
+
+          final oldestAllowed =
+              point.receivedAt.subtract(_rawHistoryRetention);
+          _rawHistory.removeWhere(
+            (entry) => entry.receivedAt.isBefore(oldestAllowed),
+          );
+
+          if (_recordingRawCsv) {
+            _rawRecording.add(point);
+          }
+        });
       } else if (char == BleUuids.statusChar.toLowerCase()) {
         final status = DeviceStatus.decode(data.value);
         if (status != null) {
@@ -108,11 +160,25 @@ class _BleImuAppState extends State<BleImuApp> {
 
     // UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
     UniversalBle.onConnectionChange = (BleConnectionChange change) {
+      if (_connectedDevice?.deviceId == change.deviceId && change.isConnected) {
+        final completer = _connectionCompleter;
+        if (completer != null && !completer.isCompleted) {
+          completer.complete();
+        }
+      }
       if (!change.isConnected && _connectedDevice?.deviceId == change.deviceId) {
+        final completer = _connectionCompleter;
+        if (completer != null && !completer.isCompleted) {
+          completer.completeError(
+            StateError(change.error?.toString() ?? "BLE connection failed"),
+          );
+        }
+
         setState(() {
           _connectedDevice = null;
           // _latestSample = null;
           _latestRawSample = null;
+          _connecting = false;
         });
       }
     };
@@ -152,78 +218,239 @@ Future<void> _startScan() async {
 
   Future<void> _connect(BleDevice device) async {
   await UniversalBle.stopScan();
-  setState(() => _isScanning = false);
 
+  if (_connecting) return;
+
+  setState(() { 
+    _isScanning = false;
+    _connecting = true;
+    _connectionError = null;
+    _connectedDevice = device;
+  });
+
+  _connectionCompleter = Completer<void>();
   try {
-    await UniversalBle.connect(device.deviceId);
-    setState(() => _connectedDevice = device);
+      // Windows Bluetooth stacks are significantly slower than macOS and
+      // often fail when discovery/subscription operations overlap.
+      await UniversalBle.connect(device.deviceId);
 
-    // CRITICAL: On Web, NEVER call discoverServices() without arguments,
-    // as it invokes getPrimaryServices() which trips over blocklisted 0x1800.
-    // Android native DOES need discoverServices() to populate Android's GATT cache.
-    if (!kIsWeb) {
-      await UniversalBle.discoverServices(device.deviceId);
+      await _connectionCompleter!.future.timeout(
+        _isWindows
+            ? _windowsConnectionTimeout
+            : _normalConnectionTimeout,
+      );
+
+      await Future<void>.delayed(_gattDelay);
+
+      // Force service discovery to finish before CCCD writes begin.
+      await _retryGattOperation(
+        () => UniversalBle.discoverServices(device.deviceId),
+      );
+
+      await Future<void>.delayed(_gattDelay);
+
+      // Subscribe serially. Parallel CCCD writes commonly time out with
+      // WinRT and Chromium Web Bluetooth on Windows.
+      await _applyEnabledSubscriptions(device.deviceId);
+
+      if (mounted) {
+        setState(() => _connecting = false);
+      }
+    } on TimeoutException {
+      await UniversalBle.disconnect(device.deviceId);
+
+      if (mounted) {
+        setState(() {
+          _connecting = false;
+          _connectedDevice = null;
+          _connectionError =
+              "Bluetooth connection timed out. Keep the device nearby and "
+              "ensure it is not connected to another application.";
+        });
+      }
+    } catch (error) {
+      await UniversalBle.disconnect(device.deviceId);
+
+      if (mounted) {
+        setState(() {
+          _connecting = false;
+          _connectedDevice = null;
+          _connectionError = "Bluetooth connection failed: $error";
+        });
+      }
+    } finally {
+      _connectionCompleter = null;
+    }
+  }
+
+  bool get _isWindows =>
+      defaultTargetPlatform == TargetPlatform.windows;
+
+  Duration get _gattDelay =>
+      _isWindows ? _windowsGattDelay : _normalGattDelay;
+
+  Future<T> _retryGattOperation<T>(
+    Future<T> Function() operation, {
+    int attempts = 3,
+  }) async {
+    Object? lastError;
+    StackTrace? lastStackTrace;
+
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await operation().timeout(
+          _isWindows
+              ? const Duration(seconds: 20)
+              : const Duration(seconds: 10),
+        );
+      } catch (error, stackTrace) {
+        lastError = error;
+        lastStackTrace = stackTrace;
+
+        if (attempt < attempts) {
+          await Future<void>.delayed(
+            Duration(milliseconds: 400 * attempt),
+          );
+        }
+      }
     }
 
-    // Small delay to ensure the GATT connection is stable before subscribing
-    await Future.delayed(const Duration(milliseconds: 200));
+    Error.throwWithStackTrace(lastError!, lastStackTrace!);
+  }
 
-    // 1. Subscribe to Quaternion Stream (IMU Service)
-    // await UniversalBle.setNotifiable(
-    //   device.deviceId,
-    //   BleUuids.imuService,
-    //   BleUuids.quaternionChar,
-    //   BleInputProperty.notification,
+  Future<void> _applyEnabledSubscriptions(String deviceId) async {
+    // await _setStreamSubscription(
+    //   deviceId: deviceId,
+    //   serviceUuid: BleUuids.imuService,
+    //   characteristicUuid: BleUuids.quaternionChar,
+    //   enabled: _enabledStreams["quaternion"]!,
     // );
 
-    //1.1 Subscribe to Raw IMU Stream (IMU Service)
-    // await UniversalBle.setNotifiable(
-    //   device.deviceId,
-    //   BleUuids.imuService,
-    //   BleUuids.rawImuChar,
-    //   BleInputProperty.notification,
-    // );
-    await UniversalBle.subscribeNotifications(
-      device.deviceId,
-      BleUuids.imuService,
-      BleUuids.rawImuChar
-    ).timeout(const Duration(seconds: 5));
-
-
-    // 2. Subscribe to Device Status Stream
-    // await UniversalBle.setNotifiable(
-    //   device.deviceId,
-    //   BleUuids.deviceStatusService,
-    //   BleUuids.statusChar,
-    //   BleInputProperty.notification,
-    // );
-    await UniversalBle.subscribeNotifications(
-      device.deviceId,
-      BleUuids.deviceStatusService,
-      BleUuids.statusChar
+    await _setStreamSubscription(
+      deviceId: deviceId,
+      serviceUuid: BleUuids.imuService,
+      characteristicUuid: BleUuids.rawImuChar,
+      enabled: _enabledStreams["rawImu"]!,
     );
-  } catch (e) {
-    if (!mounted) return;
-    debugPrint("Connection or Subscription Error: $e");
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text("Connection failed: $e"),
-        backgroundColor: Colors.red,
-      ),
+
+    await _setStreamSubscription(
+      deviceId: deviceId,
+      serviceUuid: BleUuids.auxiliaryService,
+      characteristicUuid: BleUuids.auxiliaryChar,
+      enabled: _enabledStreams["auxiliary"]!,
+    );
+
+    await _setStreamSubscription(
+      deviceId: deviceId,
+      serviceUuid: BleUuids.deviceStatusService,
+      characteristicUuid: BleUuids.statusChar,
+      enabled: _enabledStreams["status"]!,
     );
   }
-}
+
+  Future<void> _setStreamSubscription({
+    required String deviceId,
+    required String serviceUuid,
+    required String characteristicUuid,
+    required bool enabled,
+  }) async {
+    await _retryGattOperation(
+      () => UniversalBle.setNotifiable(
+        deviceId,
+        serviceUuid,
+        characteristicUuid,
+        enabled
+            ? BleInputProperty.notification
+            : BleInputProperty.disabled,
+      ),
+    );
+
+    await Future<void>.delayed(_gattDelay);
+  }
+
+  Future<void> _toggleStream(String key, bool enabled) async {
+    final previous = _enabledStreams[key]!;
+
+    setState(() => _enabledStreams[key] = enabled);
+
+    final device = _connectedDevice;
+    if (device == null) return;
+
+    late final String serviceUuid;
+    late final String characteristicUuid;
+
+    switch (key) {
+      // case "quaternion":
+      //   serviceUuid = BleUuids.imuService;
+      //   characteristicUuid = BleUuids.quaternionChar;
+      //   break;
+      case "rawImu":
+        serviceUuid = BleUuids.imuService;
+        characteristicUuid = BleUuids.rawImuChar;
+        break;
+      case "auxiliary":
+        serviceUuid = BleUuids.auxiliaryService;
+        characteristicUuid = BleUuids.auxiliaryChar;
+        break;
+      case "status":
+        serviceUuid = BleUuids.deviceStatusService;
+        characteristicUuid = BleUuids.statusChar;
+        break;
+      default:
+        return;
+    }
+
+    try {
+      await _setStreamSubscription(
+        deviceId: device.deviceId,
+        serviceUuid: serviceUuid,
+        characteristicUuid: characteristicUuid,
+        enabled: enabled,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        // if (!enabled && key == "quaternion") {
+        //   _latestSample = null;
+        // } else 
+        if (!enabled && key == "rawImu") {
+          _latestRawSample = null;
+        } else if (!enabled && key == "status") {
+          _latestStatus = null;
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _enabledStreams[key] = previous;
+        _connectionError = enabled
+            ? "Could not subscribe to $key: $error"
+            : "Could not unsubscribe from $key: $error";
+      });
+    }
+  }
 
 
   Future<void> _disconnect() async {
+    _rawRecordingTimer?.cancel();
+
     if (_connectedDevice != null) {
       await UniversalBle.disconnect(_connectedDevice!.deviceId);
       setState(() {
         _connectedDevice = null;
         // _latestSample = null;
         _latestRawSample = null;
+        _rawRecording.clear();
+        _recordingRawCsv = false;
       });
     }
+  }
+  @override
+  void dispose() {
+    _rawRecordingTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _sendCommand(BleControlCommand cmd) async {
@@ -267,6 +494,19 @@ Future<void> _startScan() async {
               icon: const Icon(Icons.link_off, color: Colors.redAccent),
               onPressed: _disconnect,
             ),
+        // if (_connecting)
+        //   const Padding(
+        //     padding: EdgeInsets.only(top: 8),
+        //     child: LinearProgressIndicator(),
+        //   ),
+        // if (_connectionError != null)
+        //   Padding(
+        //     padding: const EdgeInsets.only(top: 8),
+        //     child: Text(
+        //       _connectionError!,
+        //       style: const TextStyle(color: Colors.redAccent),
+        //     ),
+        //   ),
         ],
       ),
       body: _connectedDevice == null ? _buildScannerList() : _buildDashboard(),
@@ -552,6 +792,226 @@ Future<void> _startScan() async {
               ),
             ),
           ),
+          Card(
+            color: const Color.fromARGB(148, 93, 104, 134),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "BLE subscriptions",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    "Disable unused streams to reduce BLE traffic and power use.",
+                    style: TextStyle(color: Colors.white60, fontSize: 11),
+                  ),
+                  const Divider(),
+                  // SwitchListTile(
+                  //   contentPadding: EdgeInsets.zero,
+                  //   title: const Text("IMU quaternion"),
+                  //   subtitle: const Text(BleUuids.quaternionChar),
+                  //   value: _enabledStreams["quaternion"]!,
+                  //   onChanged: (value) => _toggleStream("quaternion", value),
+                  // ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text("IMU raw"),
+                    subtitle: const Text(BleUuids.rawImuChar),
+                    value: _enabledStreams["rawImu"]!,
+                    onChanged: (value) => _toggleStream("rawImu", value),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text("Auxiliary sensor"),
+                    subtitle: const Text(BleUuids.auxiliaryChar),
+                    value: _enabledStreams["auxiliary"]!,
+                    onChanged: (value) => _toggleStream("auxiliary", value),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text("Device status"),
+                    subtitle: const Text(BleUuids.statusChar),
+                    value: _enabledStreams["status"]!,
+                    onChanged: (value) => _toggleStream("status", value),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Card(
+            color: const Color.fromARGB(255, 121, 138, 182),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Raw data visualization",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      DropdownButton<RawSensorType>(
+                        value: _selectedRawSensor,
+                        items: const [
+                          DropdownMenuItem(
+                            value: RawSensorType.accelerometer,
+                            child: Text("Accelerometer (g)"),
+                          ),
+                          DropdownMenuItem(
+                            value: RawSensorType.gyroscope,
+                            child: Text("Gyroscope (°/s)"),
+                          ),
+                          DropdownMenuItem(
+                            value: RawSensorType.magnetometer,
+                            child: Text("Magnetometer (counts)"),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            setState(() => _selectedRawSensor = value);
+                          }
+                        },
+                      ),
+                      DropdownButton<int>(
+                        value: const [5, 10, 30]
+                                .contains(_rawChartPeriod.inSeconds)
+                            ? _rawChartPeriod.inSeconds
+                            : -1,
+                        items: const [
+                          DropdownMenuItem(value: 5, child: Text("Last 5 s")),
+                          DropdownMenuItem(value: 10, child: Text("Last 10 s")),
+                          DropdownMenuItem(value: 30, child: Text("Last 30 s")),
+                          DropdownMenuItem(value: -1, child: Text("Custom")),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+
+                          if (value == -1) {
+                            _selectCustomPeriod(
+                              current: _rawChartPeriod,
+                              onSelected: (period) {
+                                setState(() => _rawChartPeriod = period);
+                              },
+                            );
+                          } else {
+                            setState(
+                              () => _rawChartPeriod = Duration(seconds: value),
+                            );
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Wrap(
+                    spacing: 12,
+                    children: [
+                      _AxisLegend(color: Colors.redAccent, label: "X"),
+                      _AxisLegend(color: Colors.greenAccent, label: "Y"),
+                      _AxisLegend(color: Colors.lightBlueAccent, label: "Z"),
+                    ],
+                  ),
+                  RawImuChart(
+                    history: _rawHistory,
+                    sensor: _selectedRawSensor,
+                    visiblePeriod: _rawChartPeriod,
+                  ),
+                  const Divider(),
+                  const Text(
+                    "CSV recording",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      DropdownButton<int>(
+                        value: const [5, 10, 30]
+                                .contains(_rawRecordingPeriod.inSeconds)
+                            ? _rawRecordingPeriod.inSeconds
+                            : -1,
+                        items: const [
+                          DropdownMenuItem(value: 5, child: Text("5 seconds")),
+                          DropdownMenuItem(value: 10, child: Text("10 seconds")),
+                          DropdownMenuItem(value: 30, child: Text("30 seconds")),
+                          DropdownMenuItem(value: -1, child: Text("Custom")),
+                        ],
+                        onChanged: _recordingRawCsv
+                            ? null
+                            : (value) {
+                                if (value == null) return;
+
+                                if (value == -1) {
+                                  _selectCustomPeriod(
+                                    current: _rawRecordingPeriod,
+                                    onSelected: (period) {
+                                      setState(
+                                        () => _rawRecordingPeriod = period,
+                                      );
+                                    },
+                                  );
+                                } else {
+                                  setState(
+                                    () => _rawRecordingPeriod =
+                                        Duration(seconds: value),
+                                  );
+                                }
+                              },
+                      ),
+                      FilledButton.icon(
+                        onPressed: _recordingRawCsv ||
+                                _connectedDevice == null ||
+                                !_enabledStreams["rawImu"]!
+                            ? null
+                            : _startRawCsvRecording,
+                        icon: const Icon(Icons.fiber_manual_record),
+                        label: const Text("Record CSV"),
+                      ),
+                      if (_recordingRawCsv)
+                        OutlinedButton.icon(
+                          onPressed: _cancelRawCsvRecording,
+                          icon: const Icon(Icons.stop),
+                          label: const Text("Cancel"),
+                        ),
+                    ],
+                  ),
+                  if (_recordingRawCsv) ...[
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      value: _rawRecordingStartedAt == null
+                          ? null
+                          : (DateTime.now()
+                                      .difference(_rawRecordingStartedAt!)
+                                      .inMilliseconds /
+                                  _rawRecordingPeriod.inMilliseconds)
+                              .clamp(0.0, 1.0),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      "Recording ${_rawRecording.length} samples...",
+                      style: const TextStyle(color: Colors.redAccent),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
           ControlPanel(
             onSendCommand: _sendCommand,
             commandHistory: _commandHistory,
@@ -573,6 +1033,182 @@ Future<void> _startScan() async {
               ],
             );
     });
+  }
+
+  void _startRawCsvRecording() {
+    if (_recordingRawCsv || !_enabledStreams["rawImu"]!) return;
+
+    _rawRecordingTimer?.cancel();
+
+    setState(() {
+      _recordingRawCsv = true;
+      _rawRecordingStartedAt = DateTime.now();
+      _rawRecording.clear();
+    });
+
+    _rawRecordingTimer = Timer(
+      _rawRecordingPeriod,
+      _finishRawCsvRecording,
+    );
+  }
+
+  Future<void> _finishRawCsvRecording() async {
+    _rawRecordingTimer?.cancel();
+
+    final samples = List<RawImuHistoryPoint>.from(_rawRecording);
+    final startedAt = _rawRecordingStartedAt ?? DateTime.now();
+
+    if (mounted) {
+      setState(() {
+        _recordingRawCsv = false;
+        _rawRecordingStartedAt = null;
+        _rawRecording.clear();
+      });
+    }
+
+    if (samples.isEmpty) return;
+
+    final csv = StringBuffer()
+      ..writeln(
+        "received_iso8601,elapsed_ms,packet_version,sequence,"
+        "sensor_timestamp_ms,flags,accel_range_code,gyro_range_code,"
+        "accel_x_count,accel_y_count,accel_z_count,"
+        "accel_x_g,accel_y_g,accel_z_g,"
+        "gyro_x_count,gyro_y_count,gyro_z_count,"
+        "gyro_x_dps,gyro_y_dps,gyro_z_dps,"
+        "mag_x_count,mag_y_count,mag_z_count,"
+        "temperature_count,measured_rate_hz",
+      );
+
+    for (final entry in samples) {
+      final sample = entry.sample;
+      final elapsedMs =
+          entry.receivedAt.difference(startedAt).inMicroseconds / 1000.0;
+
+      csv.writeln([
+        entry.receivedAt.toUtc().toIso8601String(),
+        elapsedMs.toStringAsFixed(3),
+        sample.version,
+        sample.sequence,
+        sample.timestampMs,
+        sample.flags.raw,
+        sample.accelerometerRangeCode,
+        sample.gyroscopeRangeCode,
+        sample.accelerometerX,
+        sample.accelerometerY,
+        sample.accelerometerZ,
+        sample.accelerometerXG,
+        sample.accelerometerYG,
+        sample.accelerometerZG,
+        sample.gyroscopeX,
+        sample.gyroscopeY,
+        sample.gyroscopeZ,
+        sample.gyroscopeXDps,
+        sample.gyroscopeYDps,
+        sample.gyroscopeZDps,
+        sample.magnetometerX ?? "",
+        sample.magnetometerY ?? "",
+        sample.magnetometerZ ?? "",
+        sample.temperature ?? "",
+        sample.measuredRateHz ?? "",
+      ].join(","));
+    }
+
+    final timestamp = startedAt
+        .toUtc()
+        .toIso8601String()
+        .replaceAll(":", "-")
+        .replaceAll(".", "-");
+
+    await FileSaver.instance.saveAs(
+      name: "raw_imu_$timestamp",
+      bytes: Uint8List.fromList(utf8.encode(csv.toString())),
+      fileExtension: "csv",
+      mimeType: MimeType.csv,
+    );
+  }
+
+  void _cancelRawCsvRecording() {
+    _rawRecordingTimer?.cancel();
+
+    setState(() {
+      _recordingRawCsv = false;
+      _rawRecordingStartedAt = null;
+      _rawRecording.clear();
+    });
+  }
+
+  Future<void> _selectCustomPeriod({
+    required Duration current,
+    required ValueChanged<Duration> onSelected,
+  }) async {
+    final controller = TextEditingController(
+      text: current.inSeconds.toString(),
+    );
+
+    final seconds = await showDialog<int>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text("Custom period"),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: "Seconds",
+              helperText: "1–600 seconds",
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancel"),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = int.tryParse(controller.text.trim());
+                if (value == null || value < 1 || value > 600) return;
+                Navigator.pop(context, value);
+              },
+              child: const Text("Apply"),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (seconds != null) {
+      onSelected(Duration(seconds: seconds));
+    }
+  }
+}
+
+class _AxisLegend extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _AxisLegend({
+    required this.color,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 3,
+          color: color,
+        ),
+        const SizedBox(width: 4),
+        Text(label),
+      ],
+    );
   }
 }
 

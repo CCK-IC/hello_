@@ -9,7 +9,8 @@ class BleUuids {
   static const String deviceStatusService = "8f7c0020-4f54-4d55-8000-5849414f494d";
   static const String statusChar = "8f7c0021-4f54-4d55-8000-5849414f494d";
   static const String controlChar = "8f7c0022-4f54-4d55-8000-5849414f494d";
-
+  static const String auxiliaryService = "8f7c0010-4f54-4d55-8000-5849414f494d";
+  static const String auxiliaryChar = "8f7c0011-4f54-4d55-8000-5849414f494d";
   static const String batteryService = "0000180f-0000-1000-8000-00805f9b34fb";
   static const String batteryLevelChar = "00002a19-0000-1000-8000-00805f9b34fb";
 }
