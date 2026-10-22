@@ -12,6 +12,7 @@ dependencies:
     sdk: flutter
   universal_ble: 3.1.1 # Supports Android 8.1+ (API 27) and Web (Web Bluetooth)
   collection: ^1.18.0
+  file_saver: ^0.3.1
 
 dev_dependencies:
   flutter_test:
