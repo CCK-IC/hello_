@@ -80,7 +80,7 @@ Compact Status v2 is a fixed-size, simplified version of the Full Status binary 
 The Full IMU RAW data characteristic UUID is:
 
 ```text
-8f7c0002-4f54-4d55-8000-5849414f494d
+8f7c0099-4f54-4d55-8000-5849414f494d
 ```
 
 Full IMU RAW v1 is a fixed-size, explicitly encoded binary packet containing IMU status,  timestamp, Accelerometer range code,  Gyroscope range code, Packet sequence #,
@@ -116,7 +116,7 @@ IMU Temperature, and Real-time Sampling rate.
 The Compact IMU RAW data characteristic UUID is same as Full packet, switch Full/Compact according to MTU:
 
 ```text
-8f7c0002-4f54-4d55-8000-5849414f494d
+8f7c0099-4f54-4d55-8000-5849414f494d
 ```
 
 Compact IMU RAW v2 is a fixed-size, simplified version of the Full IMU binary packet containing IMU status,  timestamp, Packet sequence #,
