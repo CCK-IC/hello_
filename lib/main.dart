@@ -10,8 +10,8 @@ import 'package:universal_ble/universal_ble.dart';
 import "models/raw_imu_history.dart";
 import "models/protocol.dart";
 import "widgets/raw_imu_chart.dart";
-import 'widgets/imu_3d_view.dart';
-import 'widgets/euler_chart.dart';
+// import 'widgets/imu_3d_view.dart';
+// import 'widgets/euler_chart.dart';
 import 'widgets/control_panel.dart';
 
 void main() {
@@ -23,6 +23,16 @@ void main() {
   ));
 }
 
+class BleOperationException implements Exception {
+  final String operation;
+  final Object cause;
+
+  const BleOperationException(this.operation, this.cause);
+
+  @override
+  String toString() => "$operation failed: $cause";
+}
+
 class BleImuApp extends StatefulWidget {
   const BleImuApp({super.key});
 
@@ -31,10 +41,83 @@ class BleImuApp extends StatefulWidget {
 }
 
 class _BleImuAppState extends State<BleImuApp> {
-  static const Duration _normalConnectionTimeout = Duration(seconds: 20);
-  static const Duration _windowsConnectionTimeout = Duration(seconds: 45);
+  Timer? _uiRefreshTimer;
+  bool _uiRefreshPending = false;
+
+  void _scheduleUiRefresh() {
+    if (_uiRefreshPending || !mounted) return;
+
+    _uiRefreshPending = true;
+    _uiRefreshTimer = Timer(const Duration(milliseconds: 40), () {
+      _uiRefreshPending = false;
+      if (mounted) setState(() {});
+    });
+  }
+  // static const Duration _normalConnectionTimeout = Duration(seconds: 20);
+  // static const Duration _windowsConnectionTimeout = Duration(seconds: 45);
   static const Duration _windowsGattDelay = Duration(milliseconds: 350);
   static const Duration _normalGattDelay = Duration(milliseconds: 80);
+
+  void _handleRawValue(Uint8List value) {
+    final sample = RawImuSample.decode(value);
+
+    if (sample == null) {
+      _invalidRawPacketCount++;
+      _scheduleUiRefresh();
+      return;
+    }
+
+    final previous = _latestRawSample;
+    if (previous != null &&
+        previous.version == sample.version &&
+        !sample.isNewerThan(previous)) {
+      return;
+    }
+
+    final point = RawImuHistoryPoint(
+      receivedAt: DateTime.now(),
+      sample: sample,
+    );
+
+    _latestRawSample = sample;
+    _rawHistory.add(point);
+
+    if (_recordingRawCsv) {
+      _rawRecording.add(point);
+    }
+
+    _pruneRawHistory(point.receivedAt);
+    _scheduleUiRefresh();
+  }
+
+  DateTime _lastHistoryPrune = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _pruneRawHistory(DateTime now) {
+    if (now.difference(_lastHistoryPrune) < const Duration(seconds: 1)) {
+      return;
+    }
+
+    _lastHistoryPrune = now;
+    final cutoff = now.subtract(_rawHistoryRetention);
+
+    var removeCount = 0;
+    while (removeCount < _rawHistory.length &&
+        _rawHistory[removeCount].receivedAt.isBefore(cutoff)) {
+      removeCount++;
+    }
+
+    if (removeCount > 0) {
+      _rawHistory.removeRange(0, removeCount);
+    }
+  }
+
+  String? _pendingDeviceId;
+  bool _linkConnected = false;
+
+  bool _sameDevice(String? first, String? second) {
+  if (first == null || second == null) return false;
+  return first.toLowerCase() == second.toLowerCase();
+}
 
   BleDevice? _connectedDevice;
   bool _isScanning = false;
@@ -68,10 +151,10 @@ class _BleImuAppState extends State<BleImuApp> {
   DeviceStatus? _latestStatus;
   int _invalidRawPacketCount = 0;
   // Chart buffers
-  final List<double> _rollHistory = [];
-  final List<double> _pitchHistory = [];
-  final List<double> _yawHistory = [];
-  static const int _maxDataPoints = 80;
+  // final List<double> _rollHistory = [];
+  // final List<double> _pitchHistory = [];
+  // final List<double> _yawHistory = [];
+  // static const int _maxDataPoints = 80;
 
   final List<String> _commandHistory = [];
 
@@ -81,8 +164,10 @@ class _BleImuAppState extends State<BleImuApp> {
     _initBle();
   }
 
+  late final StreamController<BleCharacteristicValue> _bleDataController;
+  StreamSubscription<BleCharacteristicValue>? _bleDataSubscription;
   void _initBle() {
-    UniversalBle.queueType = QueueType.none;
+    UniversalBle.queueType = QueueType.global;
     UniversalBle.onScanResult = (device) {
       if (!_scannedDevices.any((d) => d.deviceId == device.deviceId)) {
         setState(() => _scannedDevices.add(device));
@@ -91,15 +176,47 @@ class _BleImuAppState extends State<BleImuApp> {
 
     //  Best Practice: Push data straight into a stream controller or separate isolate
     // final _bleDataController = StreamController<({String deviceId, String characteristicId, Uint8List value})>();
-    final _bleDataController = StreamController<BleCharacteristicValue >();
+    // _bleDataController = StreamController<BleCharacteristicValue >();
+    _bleDataController =
+        StreamController<BleCharacteristicValue>.broadcast(sync: true);
+    
 
     UniversalBle.onValueChange = (BleCharacteristicValue update) {//timestamp is optional and can be null
       // _bleDataController.sink.add( characteristicId: update.characteristicId, deviceId: update.deviceId,value: update.value);
-      _bleDataController.sink.add( update);
+      // _bleDataController.sink.add( update);
+      if (!_bleDataController.isClosed) {
+        _bleDataController.add(update);
+      }
     };
 
+    void _handleCharacteristicValue(BleCharacteristicValue data) {
+      if (!_sameDevice(data.deviceId, _connectedDevice?.deviceId) &&
+          !_sameDevice(data.deviceId, _pendingDeviceId)) {
+        return;
+      }
+
+      final characteristic = data.characteristicId.toLowerCase();
+
+      if (characteristic == BleUuids.rawImuChar.toLowerCase()) {
+        _handleRawValue(data.value);
+      } else if (characteristic == BleUuids.statusChar.toLowerCase()) {
+        final status = DeviceStatus.decode(data.value);
+        if (status != null) {
+          _latestStatus = status;
+          _scheduleUiRefresh();
+        }
+      }
+    }
+
+    _bleDataSubscription =
+    _bleDataController.stream.listen(_handleCharacteristicValue);
     // Listen and process elsewhere (or use an isolate for parsing heavy packets)
     _bleDataController.stream.listen((data) {
+      if (!_sameDevice(data.deviceId, _connectedDevice?.deviceId) &&
+          !_sameDevice(data.deviceId, _pendingDeviceId)) {
+        return;
+      }
+      
       // Execute parsing / state mutations here
       final char = data.characteristicId.toLowerCase();
       // if (char == BleUuids.quaternionChar.toLowerCase()) {
@@ -160,25 +277,42 @@ class _BleImuAppState extends State<BleImuApp> {
 
     // UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
     UniversalBle.onConnectionChange = (BleConnectionChange change) {
-      if (_connectedDevice?.deviceId == change.deviceId && change.isConnected) {
-        final completer = _connectionCompleter;
+      if (!_sameDevice(_pendingDeviceId, change.deviceId) &&
+          !_sameDevice(_connectedDevice?.deviceId, change.deviceId)) {
+        return;
+      }
+
+      final completer = _connectionCompleter;
+
+      if (change.isConnected) {
+        _linkConnected = true;
+
         if (completer != null && !completer.isCompleted) {
           completer.complete();
         }
+        return;
       }
-      if (!change.isConnected && _connectedDevice?.deviceId == change.deviceId) {
-        final completer = _connectionCompleter;
-        if (completer != null && !completer.isCompleted) {
-          completer.completeError(
-            StateError(change.error?.toString() ?? "BLE connection failed"),
-          );
-        }
 
+      final wasConnected = _linkConnected;
+      _linkConnected = false;
+
+      // Some stacks can emit a transient disconnected state while starting.
+      // Reject immediately only when an error is supplied or a link was active.
+      if (completer != null &&
+          !completer.isCompleted &&
+          (change.error != null || wasConnected)) {
+        completer.completeError(
+          StateError(change.error?.toString() ?? "Device disconnected"),
+        );
+      }
+
+      if (wasConnected && mounted) {
         setState(() {
           _connectedDevice = null;
-          // _latestSample = null;
           _latestRawSample = null;
+          _latestStatus = null;
           _connecting = false;
+          _connectionError = change.error?.toString() ?? "Device disconnected";
         });
       }
     };
@@ -196,8 +330,9 @@ Future<void> _startScan() async {
   final ScanFilter? scanFilter = kIsWeb
       ? ScanFilter(
           withServices: [
-            BleUuids.imuService,
             BleUuids.deviceStatusService,
+            BleUuids.imuService,
+            BleUuids.auxiliaryService,
           ],
         )
       : null;
@@ -217,68 +352,85 @@ Future<void> _startScan() async {
 }
 
   Future<void> _connect(BleDevice device) async {
-  await UniversalBle.stopScan();
+    if (_connecting) return;
 
-  if (_connecting) return;
+    try {
+      await UniversalBle.stopScan();
+    } catch (_) {
+      // Scanning may already have stopped.
+    }
 
-  setState(() { 
-    _isScanning = false;
-    _connecting = true;
-    _connectionError = null;
-    _connectedDevice = device;
-  });
+    final deviceId = device.deviceId;
 
-  _connectionCompleter = Completer<void>();
-  try {
-      // Windows Bluetooth stacks are significantly slower than macOS and
-      // often fail when discovery/subscription operations overlap.
-      await UniversalBle.connect(device.deviceId);
+    setState(() {
+      _isScanning = false;
+      _connecting = true;
+      _connectionError = null;
+    });
 
-      await _connectionCompleter!.future.timeout(
+    _pendingDeviceId = deviceId;
+    _linkConnected = false;
+    _connectionCompleter = Completer<void>();
+
+    try {
+      debugPrint("BLE: connecting to $deviceId");
+
+      await UniversalBle.connect(deviceId).timeout(
         _isWindows
-            ? _windowsConnectionTimeout
-            : _normalConnectionTimeout,
+            ? const Duration(seconds: 30)
+            : const Duration(seconds: 15),
       );
+
+      // Some implementations complete connect() before sending the callback.
+      if (!_linkConnected) {
+        await _connectionCompleter!.future.timeout(
+          _isWindows
+              ? const Duration(seconds: 20)
+              : const Duration(seconds: 10),
+        );
+      }
+
+      debugPrint("BLE: physical connection established");
 
       await Future<void>.delayed(_gattDelay);
 
-      // Force service discovery to finish before CCCD writes begin.
       await _retryGattOperation(
-        () => UniversalBle.discoverServices(device.deviceId),
+        "Service discovery",
+        () => UniversalBle.discoverServices(deviceId),
       );
 
+      debugPrint("BLE: service discovery completed");
+
       await Future<void>.delayed(_gattDelay);
+      await _applyEnabledSubscriptions(deviceId);
 
-      // Subscribe serially. Parallel CCCD writes commonly time out with
-      // WinRT and Chromium Web Bluetooth on Windows.
-      await _applyEnabledSubscriptions(device.deviceId);
+      if (!mounted) return;
 
-      if (mounted) {
-        setState(() => _connecting = false);
+      setState(() {
+        _connectedDevice = device;
+        _connecting = false;
+        _connectionError = null;
+      });
+
+      debugPrint("BLE: connection initialization completed");
+    } catch (error, stackTrace) {
+      debugPrint("BLE initialization failed: $error\n$stackTrace");
+
+      try {
+        await UniversalBle.disconnect(deviceId);
+      } catch (_) {
+        // Preserve the original failure.
       }
-    } on TimeoutException {
-      await UniversalBle.disconnect(device.deviceId);
 
       if (mounted) {
         setState(() {
-          _connecting = false;
           _connectedDevice = null;
-          _connectionError =
-              "Bluetooth connection timed out. Keep the device nearby and "
-              "ensure it is not connected to another application.";
-        });
-      }
-    } catch (error) {
-      await UniversalBle.disconnect(device.deviceId);
-
-      if (mounted) {
-        setState(() {
           _connecting = false;
-          _connectedDevice = null;
-          _connectionError = "Bluetooth connection failed: $error";
+          _connectionError = "BLE setup failed: $error";
         });
       }
     } finally {
+      _pendingDeviceId = null;
       _connectionCompleter = null;
     }
   }
@@ -289,36 +441,42 @@ Future<void> _startScan() async {
   Duration get _gattDelay =>
       _isWindows ? _windowsGattDelay : _normalGattDelay;
 
-  Future<T> _retryGattOperation<T>(
-    Future<T> Function() operation, {
-    int attempts = 3,
-  }) async {
-    Object? lastError;
-    StackTrace? lastStackTrace;
 
-    for (var attempt = 1; attempt <= attempts; attempt++) {
-      try {
-        return await operation().timeout(
-          _isWindows
-              ? const Duration(seconds: 20)
-              : const Duration(seconds: 10),
+
+Future<T> _retryGattOperation<T>(
+  String operationName,
+  Future<T> Function() operation, {
+  int attempts = 3,
+}) async {
+  Object? lastError;
+
+  for (var attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await operation().timeout(
+        _isWindows
+            ? const Duration(seconds: 20)
+            : const Duration(seconds: 12),
+      );
+    } catch (error) {
+      lastError = error;
+      debugPrint(
+        "$operationName attempt $attempt/$attempts failed: $error",
+      );
+
+      if (attempt < attempts) {
+        await Future<void>.delayed(
+          Duration(milliseconds: 500 * attempt),
         );
-      } catch (error, stackTrace) {
-        lastError = error;
-        lastStackTrace = stackTrace;
-
-        if (attempt < attempts) {
-          await Future<void>.delayed(
-            Duration(milliseconds: 400 * attempt),
-          );
-        }
       }
     }
-
-    Error.throwWithStackTrace(lastError!, lastStackTrace!);
   }
 
-  Future<void> _applyEnabledSubscriptions(String deviceId) async {
+  throw BleOperationException(
+    operationName,
+    lastError ?? StateError("Unknown BLE error"),
+  );
+}
+  // Future<void> _applyEnabledSubscriptions(String deviceId) async {
     // await _setStreamSubscription(
     //   deviceId: deviceId,
     //   serviceUuid: BleUuids.imuService,
@@ -326,47 +484,70 @@ Future<void> _startScan() async {
     //   enabled: _enabledStreams["quaternion"]!,
     // );
 
-    await _setStreamSubscription(
-      deviceId: deviceId,
-      serviceUuid: BleUuids.imuService,
-      characteristicUuid: BleUuids.rawImuChar,
-      enabled: _enabledStreams["rawImu"]!,
-    );
+  Future<void> _applyEnabledSubscriptions(String deviceId) async {
+    if (_enabledStreams["rawImu"] == true) {
+      await _subscribe(
+        deviceId,
+        BleUuids.imuService,
+        BleUuids.rawImuChar,
+      );
+    }
 
-    await _setStreamSubscription(
-      deviceId: deviceId,
-      serviceUuid: BleUuids.auxiliaryService,
-      characteristicUuid: BleUuids.auxiliaryChar,
-      enabled: _enabledStreams["auxiliary"]!,
-    );
+    if (_enabledStreams["auxiliary"] == true) {
+      await _subscribe(
+        deviceId,
+        BleUuids.auxiliaryService,
+        BleUuids.auxiliaryChar,
+      );
+    }
 
-    await _setStreamSubscription(
-      deviceId: deviceId,
-      serviceUuid: BleUuids.deviceStatusService,
-      characteristicUuid: BleUuids.statusChar,
-      enabled: _enabledStreams["status"]!,
-    );
+    if (_enabledStreams["status"] == true) {
+      await _subscribe(
+        deviceId,
+        BleUuids.deviceStatusService,
+        BleUuids.statusChar,
+      );
+    }
   }
 
-  Future<void> _setStreamSubscription({
-    required String deviceId,
-    required String serviceUuid,
-    required String characteristicUuid,
-    required bool enabled,
-  }) async {
+  Future<void> _subscribe(
+    String deviceId,
+    String serviceUuid,
+    String characteristicUuid,
+  ) async {
     await _retryGattOperation(
+      "$serviceUuid/$characteristicUuid notification setup",
       () => UniversalBle.setNotifiable(
         deviceId,
         serviceUuid,
         characteristicUuid,
-        enabled
-            ? BleInputProperty.notification
-            : BleInputProperty.disabled,
+        BleInputProperty.notification,
       ),
     );
 
     await Future<void>.delayed(_gattDelay);
   }
+
+  // Future<void> _setStreamSubscription({
+  //   required String deviceId,
+  //   required String serviceUuid,
+  //   required String characteristicUuid,
+  //   required bool enabled,
+  // }) async {
+  //   await _retryGattOperation(
+  //     "$serviceUuid/$characteristicUuid notification setup",
+  //     () => UniversalBle.setNotifiable(
+  //       deviceId,
+  //       serviceUuid,
+  //       characteristicUuid,
+  //       enabled
+  //           ? BleInputProperty.notification
+  //           : BleInputProperty.disabled,
+  //     ),
+  //   );
+
+  //   await Future<void>.delayed(_gattDelay);
+  // }
 
   Future<void> _toggleStream(String key, bool enabled) async {
     final previous = _enabledStreams[key]!;
@@ -401,11 +582,16 @@ Future<void> _startScan() async {
     }
 
     try {
-      await _setStreamSubscription(
-        deviceId: device.deviceId,
-        serviceUuid: serviceUuid,
-        characteristicUuid: characteristicUuid,
-        enabled: enabled,
+      // await _setStreamSubscription(
+      //   deviceId: device.deviceId,
+      //   serviceUuid: serviceUuid,
+      //   characteristicUuid: characteristicUuid,
+      //   enabled: enabled,
+      // );
+      await _subscribe(
+        device.deviceId,
+        BleUuids.deviceStatusService,
+        BleUuids.statusChar,
       );
 
       if (!mounted) return;
@@ -450,6 +636,18 @@ Future<void> _startScan() async {
   @override
   void dispose() {
     _rawRecordingTimer?.cancel();
+     _uiRefreshTimer?.cancel();
+    _bleDataSubscription?.cancel();
+    _bleDataController.close();
+
+    UniversalBle.onScanResult = null;
+    UniversalBle.onValueChange = null;
+    UniversalBle.onConnectionChange = null;
+
+    final device = _connectedDevice;
+    if (device != null) {
+      unawaited(UniversalBle.disconnect(device.deviceId));
+    }
     super.dispose();
   }
 
@@ -509,8 +707,22 @@ Future<void> _startScan() async {
         //   ),
         ],
       ),
-      body: _connectedDevice == null ? _buildScannerList() : _buildDashboard(),
-    );
+      
+      body: _connecting
+        ? const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 12),
+                Text("Connecting and discovering services..."),
+              ],
+            ),
+          )
+        : _connectedDevice == null
+            ? _buildScannerList()
+            : _buildDashboard(),
+        );
   }
 
   Widget _buildScannerList() {
