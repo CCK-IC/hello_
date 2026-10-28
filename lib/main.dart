@@ -42,6 +42,7 @@ class BleImuApp extends StatefulWidget {
 
 class _BleImuAppState extends State<BleImuApp> {
   Timer? _uiRefreshTimer;
+  Timer? _scanTimer;
   bool _uiRefreshPending = false;
 
   void _scheduleUiRefresh() {
@@ -137,7 +138,9 @@ class _BleImuAppState extends State<BleImuApp> {
   final List<RawImuHistoryPoint> _rawHistory = [];
   static const Duration _rawHistoryRetention = Duration(minutes: 10);
 
-  RawSensorType _selectedRawSensor = RawSensorType.accelerometer;
+  final Set<RawSensorType> _selectedRawSensors = {
+    RawSensorType.accelerometer,
+  };
   Duration _rawChartPeriod = const Duration(seconds: 10);
 
   bool _recordingRawCsv = false;
@@ -209,71 +212,7 @@ class _BleImuAppState extends State<BleImuApp> {
     }
 
     _bleDataSubscription =
-    _bleDataController.stream.listen(_handleCharacteristicValue);
-    // Listen and process elsewhere (or use an isolate for parsing heavy packets)
-    _bleDataController.stream.listen((data) {
-      if (!_sameDevice(data.deviceId, _connectedDevice?.deviceId) &&
-          !_sameDevice(data.deviceId, _pendingDeviceId)) {
-        return;
-      }
-      
-      // Execute parsing / state mutations here
-      final char = data.characteristicId.toLowerCase();
-      // if (char == BleUuids.quaternionChar.toLowerCase()) {
-      //   final sample = QuaternionSample.decode(value);
-      //   if (sample != null) {
-      //     setState(() {
-      //       _latestSample = sample;
-      //       _rollHistory.add(sample.roll);
-      //       _pitchHistory.add(sample.pitch);
-      //       _yawHistory.add(sample.yaw);
-      //       if (_rollHistory.length > _maxDataPoints) _rollHistory.removeAt(0);
-      //       if (_pitchHistory.length > _maxDataPoints) _pitchHistory.removeAt(0);
-      //       if (_yawHistory.length > _maxDataPoints) _yawHistory.removeAt(0);
-      //     });
-      //   }
-      // } else if (char == BleUuids.rawImuChar.toLowerCase()) {
-      if (char == BleUuids.rawImuChar.toLowerCase()) {
-        final sample = RawImuSample.decode(data.value);
-
-        if (sample == null) {
-          setState(() => _invalidRawPacketCount++);
-          return;
-        }
-
-        final previous = _latestRawSample;
-        if (previous != null &&
-            previous.version == sample.version &&
-            !sample.isNewerThan(previous)) {
-          return;
-        }
-
-        final point = RawImuHistoryPoint(
-          receivedAt: DateTime.now(),
-          sample: sample,
-        );
-
-        setState(() {
-          _latestRawSample = sample;
-          _rawHistory.add(point);
-
-          final oldestAllowed =
-              point.receivedAt.subtract(_rawHistoryRetention);
-          _rawHistory.removeWhere(
-            (entry) => entry.receivedAt.isBefore(oldestAllowed),
-          );
-
-          if (_recordingRawCsv) {
-            _rawRecording.add(point);
-          }
-        });
-      } else if (char == BleUuids.statusChar.toLowerCase()) {
-        final status = DeviceStatus.decode(data.value);
-        if (status != null) {
-          setState(() => _latestStatus = status);
-        }
-      }
-    });
+        _bleDataController.stream.listen(_handleCharacteristicValue);
 
     // UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
     UniversalBle.onConnectionChange = (BleConnectionChange change) {
@@ -319,6 +258,7 @@ class _BleImuAppState extends State<BleImuApp> {
   }
 
 Future<void> _startScan() async {
+  _scanTimer?.cancel();
   setState(() {
     _scannedDevices.clear();
     _isScanning = true;
@@ -345,14 +285,19 @@ Future<void> _startScan() async {
     return;
   }
 
-  Future.delayed(const Duration(seconds: 6), () async {
-    await UniversalBle.stopScan();
-    if (mounted) setState(() => _isScanning = false);
+  if (!mounted || !_isScanning) return;
+  _scanTimer = Timer(const Duration(seconds: 6), () async {
+    try {
+      await UniversalBle.stopScan();
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
+    }
   });
 }
 
   Future<void> _connect(BleDevice device) async {
     if (_connecting) return;
+    _scanTimer?.cancel();
 
     try {
       await UniversalBle.stopScan();
@@ -582,16 +527,14 @@ Future<T> _retryGattOperation<T>(
     }
 
     try {
-      // await _setStreamSubscription(
-      //   deviceId: device.deviceId,
-      //   serviceUuid: serviceUuid,
-      //   characteristicUuid: characteristicUuid,
-      //   enabled: enabled,
-      // );
-      await _subscribe(
-        device.deviceId,
-        BleUuids.deviceStatusService,
-        BleUuids.statusChar,
+      await _retryGattOperation(
+        "$serviceUuid/$characteristicUuid notification setup",
+        () => UniversalBle.setNotifiable(
+          device.deviceId,
+          serviceUuid,
+          characteristicUuid,
+          enabled ? BleInputProperty.notification : BleInputProperty.disabled,
+        ),
       );
 
       if (!mounted) return;
@@ -636,6 +579,7 @@ Future<T> _retryGattOperation<T>(
   @override
   void dispose() {
     _rawRecordingTimer?.cancel();
+    _scanTimer?.cancel();
      _uiRefreshTimer?.cancel();
     _bleDataSubscription?.cancel();
     _bleDataController.close();
@@ -1076,28 +1020,25 @@ Future<T> _retryGattOperation<T>(
                     runSpacing: 8,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      DropdownButton<RawSensorType>(
-                        value: _selectedRawSensor,
-                        items: const [
-                          DropdownMenuItem(
-                            value: RawSensorType.accelerometer,
-                            child: Text("Accelerometer (g)"),
-                          ),
-                          DropdownMenuItem(
-                            value: RawSensorType.gyroscope,
-                            child: Text("Gyroscope (°/s)"),
-                          ),
-                          DropdownMenuItem(
-                            value: RawSensorType.magnetometer,
-                            child: Text("Magnetometer (counts)"),
-                          ),
-                        ],
-                        onChanged: (value) {
-                          if (value != null) {
-                            setState(() => _selectedRawSensor = value);
-                          }
-                        },
-                      ),
+                      for (final sensor in RawSensorType.values)
+                        FilterChip(
+                          label: Text(switch (sensor) {
+                            RawSensorType.accelerometer => "Accelerometer (g)",
+                            RawSensorType.gyroscope => "Gyroscope (°/s)",
+                            RawSensorType.magnetometer => "Magnetometer (counts)",
+                          }),
+                          selected: _selectedRawSensors.contains(sensor),
+                          onSelected: (selected) {
+                            if (!selected && _selectedRawSensors.length == 1) return;
+                            setState(() {
+                              if (selected) {
+                                _selectedRawSensors.add(sensor);
+                              } else {
+                                _selectedRawSensors.remove(sensor);
+                              }
+                            });
+                          },
+                        ),
                       DropdownButton<int>(
                         value: const [5, 10, 30]
                                 .contains(_rawChartPeriod.inSeconds)
@@ -1137,10 +1078,23 @@ Future<T> _retryGattOperation<T>(
                       _AxisLegend(color: Colors.lightBlueAccent, label: "Z"),
                     ],
                   ),
-                  RawImuChart(
-                    history: _rawHistory,
-                    sensor: _selectedRawSensor,
-                    visiblePeriod: _rawChartPeriod,
+                  for (final sensor in RawSensorType.values)
+                    if (_selectedRawSensors.contains(sensor)) ...[
+                      Text(switch (sensor) {
+                        RawSensorType.accelerometer => "Accelerometer (g)",
+                        RawSensorType.gyroscope => "Gyroscope (°/s)",
+                        RawSensorType.magnetometer => "Magnetometer (counts)",
+                      }),
+                      RawImuChart(
+                        history: _rawHistory,
+                        sensor: sensor,
+                        visiblePeriod: _rawChartPeriod,
+                      ),
+                    ],
+                  OutlinedButton.icon(
+                    onPressed: _rawHistory.isEmpty ? null : _saveRawBufferCsv,
+                    icon: const Icon(Icons.download),
+                    label: Text("Save buffer CSV (${_rawHistory.length} samples)"),
                   ),
                   const Divider(),
                   const Text(
@@ -1279,6 +1233,20 @@ Future<T> _retryGattOperation<T>(
     }
 
     if (samples.isEmpty) return;
+    await _saveRawCsv(samples, startedAt, "raw_imu");
+  }
+
+  Future<void> _saveRawBufferCsv() async {
+    final samples = List<RawImuHistoryPoint>.from(_rawHistory);
+    if (samples.isEmpty) return;
+    await _saveRawCsv(samples, samples.first.receivedAt, "raw_imu_buffer");
+  }
+
+  Future<void> _saveRawCsv(
+    List<RawImuHistoryPoint> samples,
+    DateTime startedAt,
+    String prefix,
+  ) async {
 
     final csv = StringBuffer()
       ..writeln(
@@ -1332,12 +1300,30 @@ Future<T> _retryGattOperation<T>(
         .replaceAll(":", "-")
         .replaceAll(".", "-");
 
-    await FileSaver.instance.saveAs(
-      name: "raw_imu_$timestamp",
-      bytes: Uint8List.fromList(utf8.encode(csv.toString())),
-      fileExtension: "csv",
-      mimeType: MimeType.csv,
-    );
+    try {
+      final bytes = Uint8List.fromList(utf8.encode(csv.toString()));
+      if (kIsWeb) {
+        await FileSaver.instance.saveFile(
+          name: "${prefix}_$timestamp",
+          bytes: bytes,
+          fileExtension: "csv",
+          mimeType: MimeType.csv,
+        );
+      } else {
+        await FileSaver.instance.saveAs(
+          name: "${prefix}_$timestamp",
+          bytes: bytes,
+          fileExtension: "csv",
+          mimeType: MimeType.csv,
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("CSV save failed: $error")),
+        );
+      }
+    }
   }
 
   void _cancelRawCsvRecording() {
