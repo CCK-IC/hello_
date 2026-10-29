@@ -20,10 +20,29 @@ class RawImuChart extends StatelessWidget {
   Widget build(BuildContext context) {
     final now = DateTime.now();
     final start = now.subtract(visiblePeriod);
-    final points = history
-        .where((point) => !point.receivedAt.isBefore(start))
-        .where((point) => point.valuesFor(sensor) != null)
-        .toList(growable: false);
+    // History is time ordered. Skip old samples without scanning the entire
+    // ten minute buffer on every UI refresh.
+    var low = 0;
+    var high = history.length;
+    while (low < high) {
+      final mid = (low + high) ~/ 2;
+      if (history[mid].receivedAt.isBefore(start)) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    final points = <RawImuHistoryPoint>[];
+    final stride = math.max(1, (history.length - low) ~/ 2000);
+    for (var i = low; i < history.length; i += stride) {
+      final point = history[i];
+      if (point.valuesFor(sensor) != null) points.add(point);
+    }
+    if (low < history.length &&
+        (points.isEmpty || !identical(points.last, history.last)) &&
+        history.last.valuesFor(sensor) != null) {
+      points.add(history.last);
+    }
 
     if (points.length < 2) {
       return const SizedBox(

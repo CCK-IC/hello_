@@ -4,11 +4,13 @@ import '../models/protocol.dart';
 class ControlPanel extends StatefulWidget {
   final Future<void> Function(BleControlCommand cmd) onSendCommand;
   final List<String> commandHistory;
+  final int initialRateHz;
 
   const ControlPanel({
     super.key,
     required this.onSendCommand,
     required this.commandHistory,
+    this.initialRateHz = 100,
   });
 
   @override
@@ -16,11 +18,20 @@ class ControlPanel extends StatefulWidget {
 }
 
 class _ControlPanelState extends State<ControlPanel> {
-  double _requestedRate = 100;
+  late double _requestedRate;
   double _statusPeriodMs = 1000;
   bool _slowMode = false;
+  bool _sending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _requestedRate = widget.initialRateHz.toDouble();
+  }
 
   void _send(BleControlCommand cmd) async {
+    if (_sending) return;
+    setState(() => _sending = true);
     try {
       await widget.onSendCommand(cmd);
       if (!mounted) return;
@@ -28,9 +39,12 @@ class _ControlPanelState extends State<ControlPanel> {
         SnackBar(content: Text("Sent: ${cmd.name}"), duration: const Duration(seconds: 1)),
       );
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Failed: $e"), backgroundColor: Colors.red),
       );
+    } finally {
+      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -72,7 +86,7 @@ class _ControlPanelState extends State<ControlPanel> {
               max: 200,
               value: _requestedRate,
               onChanged: (v) => setState(() => _requestedRate = v),
-              onChangeEnd: (v) => _send(SetRateCommand(v.toInt())),
+              onChangeEnd: _sending ? null : (v) => _send(SetRateCommand(v.toInt())),
             ),
             Text("Status Update Period: ${_statusPeriodMs.toInt()} ms"),
             Slider(
@@ -80,7 +94,7 @@ class _ControlPanelState extends State<ControlPanel> {
               max: 5000,
               value: _statusPeriodMs,
               onChanged: (v) => setState(() => _statusPeriodMs = v),
-              onChangeEnd: (v) => _send(SetStatusPeriodCommand(v.toInt())),
+              onChangeEnd: _sending ? null : (v) => _send(SetStatusPeriodCommand(v.toInt())),
             ),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -88,7 +102,7 @@ class _ControlPanelState extends State<ControlPanel> {
                 const Text("Slow/Debug Mode (0x04)"),
                 Switch(
                   value: _slowMode,
-                  onChanged: (val) {
+                  onChanged: _sending ? null : (val) {
                     setState(() => _slowMode = val);
                     _send(SetSlowModeCommand(val));
                   },
@@ -103,13 +117,13 @@ class _ControlPanelState extends State<ControlPanel> {
                 OutlinedButton.icon(
                   icon: const Icon(Icons.refresh),
                   label: const Text("Reinit IMU (0x06)"),
-                  onPressed: () => _send(SensorRecoveryCommand()),
+                  onPressed: _sending ? null : () => _send(SensorRecoveryCommand()),
                 ),
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade900),
                   icon: const Icon(Icons.power_settings_new),
                   label: const Text("Power Off (0x05)"),
-                  onPressed: _confirmPowerOff,
+                  onPressed: _sending ? null : _confirmPowerOff,
                 ),
               ],
             ),

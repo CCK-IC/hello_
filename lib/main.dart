@@ -114,6 +114,13 @@ class _BleImuAppState extends State<BleImuApp> {
 
   String? _pendingDeviceId;
   bool _linkConnected = false;
+  bool _connectionLostDuringSetup = false;
+
+  void _ensureSetupConnected() {
+    if (!_linkConnected || _connectionLostDuringSetup) {
+      throw StateError("Device disconnected during BLE setup");
+    }
+  }
 
   bool _sameDevice(String? first, String? second) {
   if (first == null || second == null) return false;
@@ -164,6 +171,9 @@ class _BleImuAppState extends State<BleImuApp> {
   @override
   void initState() {
     super.initState();
+    // Windows peers have stalled while enabling the status CCC. Keep the
+    // connection usable and let the user opt in to status notifications.
+    if (_isWindows) _enabledStreams["status"] = false;
     _initBle();
   }
 
@@ -221,6 +231,11 @@ class _BleImuAppState extends State<BleImuApp> {
         return;
       }
 
+      debugPrint(
+        "BLE: connection changed connected=${change.isConnected} "
+        "error=${change.error}",
+      );
+
       final completer = _connectionCompleter;
 
       if (change.isConnected) {
@@ -234,6 +249,10 @@ class _BleImuAppState extends State<BleImuApp> {
 
       final wasConnected = _linkConnected;
       _linkConnected = false;
+      if (_sameDevice(_pendingDeviceId, change.deviceId) &&
+          (wasConnected || change.error != null)) {
+        _connectionLostDuringSetup = true;
+      }
 
       // Some stacks can emit a transient disconnected state while starting.
       // Reject immediately only when an error is supplied or a link was active.
@@ -250,7 +269,7 @@ class _BleImuAppState extends State<BleImuApp> {
           _connectedDevice = null;
           _latestRawSample = null;
           _latestStatus = null;
-          _connecting = false;
+          if (_pendingDeviceId == null) _connecting = false;
           _connectionError = change.error?.toString() ?? "Device disconnected";
         });
       }
@@ -262,6 +281,7 @@ Future<void> _startScan() async {
   setState(() {
     _scannedDevices.clear();
     _isScanning = true;
+    _connectionError = null;
   });
 
   // On Web, all services you intend to access MUST be declared in the scan filter,
@@ -274,6 +294,9 @@ Future<void> _startScan() async {
             BleUuids.imuService,
             BleUuids.auxiliaryService,
           ],
+          // The firmware puts its name in the primary advertisement and the
+          // service UUID in the scan response. macOS Chrome may see only one.
+          withNamePrefix: ["XIAO-IMU-RAW"],
         )
       : null;
 
@@ -281,7 +304,12 @@ Future<void> _startScan() async {
     await UniversalBle.startScan(scanFilter: scanFilter);
   } catch (e) {
     debugPrint("Scan failed: $e");
-    setState(() => _isScanning = false);
+    if (mounted) {
+      setState(() {
+        _isScanning = false;
+        _connectionError = "Scan failed: $e";
+      });
+    }
     return;
   }
 
@@ -315,6 +343,7 @@ Future<void> _startScan() async {
 
     _pendingDeviceId = deviceId;
     _linkConnected = false;
+    _connectionLostDuringSetup = false;
     _connectionCompleter = Completer<void>();
 
     try {
@@ -334,20 +363,38 @@ Future<void> _startScan() async {
               : const Duration(seconds: 10),
         );
       }
+      _ensureSetupConnected();
 
       debugPrint("BLE: physical connection established");
 
       await Future<void>.delayed(_gattDelay);
+      _ensureSetupConnected();
 
       await _retryGattOperation(
         "Service discovery",
         () => UniversalBle.discoverServices(deviceId),
       );
+      _ensureSetupConnected();
 
       debugPrint("BLE: service discovery completed");
 
       await Future<void>.delayed(_gattDelay);
+      _ensureSetupConnected();
+      if ((_isWindows || _isMacChrome) &&
+          _enabledStreams["rawImu"] == true) {
+        final initialRateHz = _isMacChrome ? 10 : 25;
+        debugPrint("BLE: setting initial raw stream rate to $initialRateHz Hz");
+        await UniversalBle.write(
+          deviceId,
+          BleUuids.deviceStatusService,
+          BleUuids.controlChar,
+          Uint8List.fromList([0x01, initialRateHz, 0]),
+          timeout: const Duration(seconds: 15),
+        );
+        _ensureSetupConnected();
+      }
       await _applyEnabledSubscriptions(deviceId);
+      _ensureSetupConnected();
 
       if (!mounted) return;
 
@@ -383,8 +430,15 @@ Future<void> _startScan() async {
   bool get _isWindows =>
       defaultTargetPlatform == TargetPlatform.windows;
 
+  bool get _isMacChrome =>
+      kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
   Duration get _gattDelay =>
-      _isWindows ? _windowsGattDelay : _normalGattDelay;
+      _isWindows
+          ? _windowsGattDelay
+          : _isMacChrome
+              ? const Duration(milliseconds: 800)
+              : _normalGattDelay;
 
 
 
@@ -487,7 +541,9 @@ Future<T> _retryGattOperation<T>(
     String serviceUuid,
     String characteristicUuid,
   ) async {
+    debugPrint("BLE: enabling notifications $serviceUuid/$characteristicUuid");
     await _setSubscription(deviceId, serviceUuid, characteristicUuid, true);
+    debugPrint("BLE: notifications enabled $serviceUuid/$characteristicUuid");
 
     await Future<void>.delayed(_gattDelay);
   }
@@ -610,21 +666,16 @@ Future<T> _retryGattOperation<T>(
   Future<void> _sendCommand(BleControlCommand cmd) async {
     if (_connectedDevice == null) throw Exception("Device not connected");
     final payload = cmd.serialize();
-
-    // await UniversalBle.writeValue(
-    //   _connectedDevice!.deviceId,
-    //   BleUuids.deviceStatusService,
-    //   BleUuids.controlChar,
-    //   payload,
-    //   BleOutputProperty.withResponse,
-    // );
+    final deviceId = _connectedDevice!.deviceId;
     await UniversalBle.write(
-      _connectedDevice!.deviceId,
+      deviceId,
       BleUuids.deviceStatusService,
       BleUuids.controlChar,
-      payload
+      payload,
+      timeout: const Duration(seconds: 15),
     );
 
+    if (!mounted) return;
     setState(() {
       _commandHistory.add("[${DateTime.now().toIso8601String().substring(11, 19)}] ${cmd.name}");
     });
@@ -685,6 +736,12 @@ Future<T> _retryGattOperation<T>(
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
+        if (_connectionError != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(_connectionError!,
+                style: const TextStyle(color: Colors.red)),
+          ),
         if (_isScanning) const LinearProgressIndicator(),
         const SizedBox(height: 12),
         const Text("Available BLE Devices", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
@@ -781,6 +838,12 @@ Future<T> _retryGattOperation<T>(
 
       final statusAndControlsColumn = ListView(
         children: [
+          if (_connectionError != null)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Text(_connectionError!,
+                  style: const TextStyle(color: Colors.red)),
+            ),
           // Telemetry and Status Details
           Card(
             color: const Color.fromARGB(80, 30, 34, 45),
@@ -1193,6 +1256,9 @@ Future<T> _retryGattOperation<T>(
           ControlPanel(
             onSendCommand: _sendCommand,
             commandHistory: _commandHistory,
+            initialRateHz: _isMacChrome && _enabledStreams["rawImu"] == true
+                ? 10
+                : 100,
           ),
         ],
       );
