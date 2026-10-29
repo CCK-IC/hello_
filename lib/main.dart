@@ -430,11 +430,12 @@ Future<T> _retryGattOperation<T>(
     // );
 
   Future<void> _applyEnabledSubscriptions(String deviceId) async {
-    if (_enabledStreams["rawImu"] == true) {
+    // Establish status while the device is not yet sending raw samples.
+    if (_enabledStreams["status"] == true) {
       await _subscribe(
         deviceId,
-        BleUuids.imuService,
-        BleUuids.rawImuChar,
+        BleUuids.deviceStatusService,
+        BleUuids.statusChar,
       );
     }
 
@@ -446,11 +447,37 @@ Future<T> _retryGattOperation<T>(
       );
     }
 
-    if (_enabledStreams["status"] == true) {
+    if (_enabledStreams["rawImu"] == true) {
       await _subscribe(
         deviceId,
-        BleUuids.deviceStatusService,
-        BleUuids.statusChar,
+        BleUuids.imuService,
+        BleUuids.rawImuChar,
+      );
+    }
+  }
+
+  Future<void> _setSubscription(
+    String deviceId,
+    String serviceUuid,
+    String characteristicUuid,
+    bool enabled,
+  ) async {
+    // A timed-out WinRT CCC write can still be active. Do not launch a second
+    // write to the same characteristic while the first one is unresolved.
+    const timeout = Duration(seconds: 30);
+    if (enabled) {
+      await UniversalBle.subscribeNotifications(
+        deviceId,
+        serviceUuid,
+        characteristicUuid,
+        timeout: timeout,
+      );
+    } else {
+      await UniversalBle.unsubscribe(
+        deviceId,
+        serviceUuid,
+        characteristicUuid,
+        timeout: timeout,
       );
     }
   }
@@ -460,15 +487,7 @@ Future<T> _retryGattOperation<T>(
     String serviceUuid,
     String characteristicUuid,
   ) async {
-    await _retryGattOperation(
-      "$serviceUuid/$characteristicUuid notification setup",
-      () => UniversalBle.setNotifiable(
-        deviceId,
-        serviceUuid,
-        characteristicUuid,
-        BleInputProperty.notification,
-      ),
-    );
+    await _setSubscription(deviceId, serviceUuid, characteristicUuid, true);
 
     await Future<void>.delayed(_gattDelay);
   }
@@ -527,15 +546,8 @@ Future<T> _retryGattOperation<T>(
     }
 
     try {
-      await _retryGattOperation(
-        "$serviceUuid/$characteristicUuid notification setup",
-        () => UniversalBle.setNotifiable(
-          device.deviceId,
-          serviceUuid,
-          characteristicUuid,
-          enabled ? BleInputProperty.notification : BleInputProperty.disabled,
-        ),
-      );
+      await _setSubscription(
+        device.deviceId, serviceUuid, characteristicUuid, enabled);
 
       if (!mounted) return;
 
