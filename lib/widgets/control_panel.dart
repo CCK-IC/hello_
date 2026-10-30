@@ -4,13 +4,13 @@ import '../models/protocol.dart';
 class ControlPanel extends StatefulWidget {
   final Future<void> Function(BleControlCommand cmd) onSendCommand;
   final List<String> commandHistory;
-  final int initialRateHz;
+  final int? initialRateHz;
 
   const ControlPanel({
     super.key,
     required this.onSendCommand,
     required this.commandHistory,
-    this.initialRateHz = 100,
+    this.initialRateHz,
   });
 
   @override
@@ -19,6 +19,7 @@ class ControlPanel extends StatefulWidget {
 
 class _ControlPanelState extends State<ControlPanel> {
   late double _requestedRate;
+  int? _lastRateSetByApp;
   double _statusPeriodMs = 1000;
   bool _slowMode = false;
   bool _sending = false;
@@ -26,7 +27,8 @@ class _ControlPanelState extends State<ControlPanel> {
   @override
   void initState() {
     super.initState();
-    _requestedRate = widget.initialRateHz.toDouble();
+    _lastRateSetByApp = widget.initialRateHz;
+    _requestedRate = (widget.initialRateHz ?? 25).toDouble();
   }
 
   void _send(BleControlCommand cmd) async {
@@ -35,6 +37,9 @@ class _ControlPanelState extends State<ControlPanel> {
     try {
       await widget.onSendCommand(cmd);
       if (!mounted) return;
+      if (cmd is SetRateCommand) {
+        setState(() => _lastRateSetByApp = cmd.rateHz);
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Sent: ${cmd.name}"), duration: const Duration(seconds: 1)),
       );
@@ -80,7 +85,10 @@ class _ControlPanelState extends State<ControlPanel> {
           children: [
             const Text("Control Commands", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            Text("Notification Stream Rate: ${_requestedRate.toInt()} Hz"),
+            Text("Rate to send: ${_requestedRate.toInt()} Hz"),
+            Text(_lastRateSetByApp == null
+                ? "Stream rate has not been set by this app"
+                : "Last rate set by app: $_lastRateSetByApp Hz"),
             Slider(
               min: 1,
               max: 200,

@@ -9,6 +9,9 @@ import 'package:universal_ble/universal_ble.dart';
 
 import "models/raw_imu_history.dart";
 import "models/protocol.dart";
+import "models/ble_stream_diagnostics.dart";
+import "models/subscription_operation_gate.dart";
+import "models/raw_stream_watchdog.dart";
 import "widgets/raw_imu_chart.dart";
 // import 'widgets/imu_3d_view.dart';
 // import 'widgets/euler_chart.dart';
@@ -41,8 +44,25 @@ class BleImuApp extends StatefulWidget {
 }
 
 class _BleImuAppState extends State<BleImuApp> {
+  static const bool _bleDiagnosticsEnabled =
+      bool.fromEnvironment('BLE_DIAGNOSTICS');
+  final _streamDiagnostics = BleStreamDiagnostics();
+  Timer? _diagnosticsTimer;
   Timer? _uiRefreshTimer;
   Timer? _scanTimer;
+  Timer? _rawWatchdogTimer;
+  final _rawWatchdog = RawStreamWatchdog();
+  bool _rawStreamStalled = false;
+
+  void _startRawWatchdog() {
+    _rawWatchdog.start(DateTime.now());
+    _rawStreamStalled = false;
+  }
+
+  void _stopRawWatchdog() {
+    _rawWatchdog.stop();
+    _rawStreamStalled = false;
+  }
   bool _uiRefreshPending = false;
 
   void _scheduleUiRefresh() {
@@ -116,6 +136,7 @@ class _BleImuAppState extends State<BleImuApp> {
   bool _linkConnected = false;
   bool _connectionLostDuringSetup = false;
   bool _disconnecting = false;
+  final _subscriptionGate = SubscriptionOperationGate();
 
   void _ensureSetupConnected() {
     if (!mounted || !_linkConnected || _connectionLostDuringSetup) {
@@ -134,6 +155,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
   bool _connecting = false;
   String? _connectionError;
+  int? _initialRateSetByApp;
 
   final Map<String, bool> _enabledStreams = {
     "quaternion": true,
@@ -171,10 +193,22 @@ class _BleImuAppState extends State<BleImuApp> {
   @override
   void initState() {
     super.initState();
+    _rawWatchdogTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final stalled = _rawWatchdog.isStalled(DateTime.now());
+      if (mounted && stalled != _rawStreamStalled) {
+        setState(() => _rawStreamStalled = stalled);
+      }
+    });
     // Windows peers have stalled while enabling the status CCC. Keep the
     // connection usable and let the user opt in to status notifications.
     if (_isWindows) _enabledStreams["status"] = false;
     _initBle();
+    if (_bleDiagnosticsEnabled) {
+      _diagnosticsTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+        debugPrint('BLE diagnostics: connected=$_linkConnected '
+            '${_streamDiagnostics.describe(DateTime.now())}');
+      });
+    }
   }
 
   late final StreamController<BleCharacteristicValue> _bleDataController;
@@ -212,6 +246,10 @@ class _BleImuAppState extends State<BleImuApp> {
       final characteristic = data.characteristicId.toLowerCase();
 
       if (characteristic == BleUuids.rawImuChar.toLowerCase()) {
+        _rawWatchdog.recordActivity(DateTime.now());
+        if (_bleDiagnosticsEnabled) {
+          _streamDiagnostics.record(data.value, DateTime.now());
+        }
         _handleRawValue(data.value);
       } else if (characteristic == BleUuids.statusChar.toLowerCase()) {
         final status = DeviceStatus.decode(data.value);
@@ -244,6 +282,8 @@ class _BleImuAppState extends State<BleImuApp> {
 
       final wasConnected = _linkConnected;
       _linkConnected = false;
+      _stopRawWatchdog();
+      if (wasConnected) _subscriptionGate.reset();
       if (_sameDevice(_pendingDeviceId, change.deviceId) &&
           (wasConnected || change.error != null)) {
         _connectionLostDuringSetup = true;
@@ -303,6 +343,12 @@ Future<void> _startScan() async {
   }
 
   if (!mounted || !_isScanning) return;
+  // Web Bluetooth's chooser returns one selected device; it is not an
+  // ongoing scan. Do not leave the UI in scanning state after it closes.
+  if (kIsWeb) {
+    setState(() => _isScanning = false);
+    return;
+  }
   _scanTimer = Timer(const Duration(seconds: 6), () async {
     try {
       await UniversalBle.stopScan();
@@ -335,8 +381,10 @@ Future<void> _startScan() async {
     _pendingDeviceId = deviceId;
     _linkConnected = false;
     _connectionLostDuringSetup = false;
+    _initialRateSetByApp = null;
 
     try {
+      if (_bleDiagnosticsEnabled) _streamDiagnostics.reset();
       debugPrint("BLE: connecting to $deviceId");
 
       await UniversalBle.connect(
@@ -378,6 +426,7 @@ Future<void> _startScan() async {
           timeout: const Duration(seconds: 15),
         );
         _ensureSetupConnected();
+        _initialRateSetByApp = initialRateHz;
       }
       await _applyEnabledSubscriptions(deviceId);
       _ensureSetupConnected();
@@ -388,6 +437,7 @@ Future<void> _startScan() async {
         _connectedDevice = device;
         _connecting = false;
         _connectionError = null;
+        if (_enabledStreams["rawImu"] == true) _startRawWatchdog();
       });
 
       debugPrint("BLE: connection initialization completed");
@@ -525,12 +575,20 @@ Future<void> _startScan() async {
   // }
 
   Future<void> _toggleStream(String key, bool enabled) async {
+    final token = _subscriptionGate.begin(key);
+    if (token == null) return;
     final previous = _enabledStreams[key]!;
 
-    setState(() => _enabledStreams[key] = enabled);
+    setState(() {
+      _enabledStreams[key] = enabled;
+      if (key == "rawImu" && !enabled) _stopRawWatchdog();
+    });
 
     final device = _connectedDevice;
-    if (device == null) return;
+    if (device == null) {
+      _subscriptionGate.finish(key, token);
+      return;
+    }
 
     late final String serviceUuid;
     late final String characteristicUuid;
@@ -553,6 +611,7 @@ Future<void> _startScan() async {
         characteristicUuid = BleUuids.statusChar;
         break;
       default:
+        _subscriptionGate.finish(key, token);
         return;
     }
 
@@ -560,9 +619,10 @@ Future<void> _startScan() async {
       await _setSubscription(
         device.deviceId, serviceUuid, characteristicUuid, enabled);
 
-      if (!mounted) return;
+      if (!_subscriptionGate.finish(key, token) || !mounted) return;
 
       setState(() {
+        if (enabled && key == "rawImu") _startRawWatchdog();
         // if (!enabled && key == "quaternion") {
         //   _latestSample = null;
         // } else 
@@ -573,13 +633,21 @@ Future<void> _startScan() async {
         }
       });
     } catch (error) {
-      if (!mounted) return;
+      final timedOut = error is TimeoutException;
+      if (!_subscriptionGate.finish(key, token, timedOut: timedOut) ||
+          !mounted) {
+        return;
+      }
 
       setState(() {
         _enabledStreams[key] = previous;
-        _connectionError = enabled
-            ? "Could not subscribe to $key: $error"
-            : "Could not unsubscribe from $key: $error";
+        if (key == "rawImu" && previous && !timedOut) _startRawWatchdog();
+        _connectionError = timedOut
+            ? "The $key subscription timed out and may still be changing. "
+                "Disconnect and reconnect before changing it again."
+            : enabled
+                ? "Could not subscribe to $key: $error"
+                : "Could not unsubscribe from $key: $error";
       });
     }
   }
@@ -590,6 +658,7 @@ Future<void> _startScan() async {
     final device = _connectedDevice;
     if (device == null) return;
     _disconnecting = true;
+    _stopRawWatchdog();
     _rawRecordingTimer?.cancel();
     try {
       await UniversalBle.disconnect(device.deviceId,
@@ -603,6 +672,7 @@ Future<void> _startScan() async {
       setState(() {
         _connectedDevice = null;
         _linkConnected = false;
+        _subscriptionGate.reset();
         // _latestSample = null;
         _latestRawSample = null;
         _latestStatus = null;
@@ -611,7 +681,12 @@ Future<void> _startScan() async {
       });
     } catch (error) {
       if (mounted) {
-        setState(() => _connectionError = "Disconnect failed: $error");
+        setState(() {
+          if (_connectedDevice != null && _enabledStreams["rawImu"] == true) {
+            _startRawWatchdog();
+          }
+          _connectionError = "Disconnect failed: $error";
+        });
       }
     } finally {
       _disconnecting = false;
@@ -619,6 +694,8 @@ Future<void> _startScan() async {
   }
   @override
   void dispose() {
+    _rawWatchdogTimer?.cancel();
+    _diagnosticsTimer?.cancel();
     _rawRecordingTimer?.cancel();
     _scanTimer?.cancel();
      _uiRefreshTimer?.cancel();
@@ -665,8 +742,14 @@ Future<void> _startScan() async {
         actions: [
           if (_connectedDevice == null)
             IconButton(
-              icon: Icon(_isScanning ? Icons.stop : Icons.search),
-              onPressed: _isScanning ? () => UniversalBle.stopScan() : _startScan,
+              icon: Icon(_isScanning && !kIsWeb ? Icons.stop : Icons.search),
+              // Browsers own the chooser and only the user can dismiss it.
+              // A stopScan queued behind requestDevice cannot close it.
+              onPressed: _isScanning && kIsWeb
+                  ? null
+                  : _isScanning
+                      ? () => UniversalBle.stopScan()
+                      : _startScan,
             )
           else
             IconButton(
@@ -812,6 +895,14 @@ Future<void> _startScan() async {
 
       final statusAndControlsColumn = ListView(
         children: [
+          if (_rawStreamStalled)
+            const Padding(
+              padding: EdgeInsets.all(8),
+              child: Text(
+                "Raw notifications have stopped. The device may be disconnected; disconnect and reconnect to retry.",
+                style: TextStyle(color: Colors.red),
+              ),
+            ),
           if (_connectionError != null)
             Padding(
               padding: const EdgeInsets.all(8),
@@ -1029,21 +1120,27 @@ Future<void> _startScan() async {
                     title: const Text("IMU raw"),
                     subtitle: const Text(BleUuids.rawImuChar),
                     value: _enabledStreams["rawImu"]!,
-                    onChanged: (value) => _toggleStream("rawImu", value),
+                    onChanged: _subscriptionGate.canStart("rawImu")
+                        ? (value) => _toggleStream("rawImu", value)
+                        : null,
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text("Auxiliary sensor"),
                     subtitle: const Text(BleUuids.auxiliaryChar),
                     value: _enabledStreams["auxiliary"]!,
-                    onChanged: (value) => _toggleStream("auxiliary", value),
+                    onChanged: _subscriptionGate.canStart("auxiliary")
+                        ? (value) => _toggleStream("auxiliary", value)
+                        : null,
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text("Device status"),
                     subtitle: const Text(BleUuids.statusChar),
                     value: _enabledStreams["status"]!,
-                    onChanged: (value) => _toggleStream("status", value),
+                    onChanged: _subscriptionGate.canStart("status")
+                        ? (value) => _toggleStream("status", value)
+                        : null,
                   ),
                 ],
               ),
@@ -1230,9 +1327,7 @@ Future<void> _startScan() async {
           ControlPanel(
             onSendCommand: _sendCommand,
             commandHistory: _commandHistory,
-            initialRateHz: _isMacChrome && _enabledStreams["rawImu"] == true
-                ? 10
-                : 100,
+            initialRateHz: _initialRateSetByApp,
           ),
         ],
       );
