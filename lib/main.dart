@@ -115,23 +115,23 @@ class _BleImuAppState extends State<BleImuApp> {
   String? _pendingDeviceId;
   bool _linkConnected = false;
   bool _connectionLostDuringSetup = false;
+  bool _disconnecting = false;
 
   void _ensureSetupConnected() {
-    if (!_linkConnected || _connectionLostDuringSetup) {
+    if (!mounted || !_linkConnected || _connectionLostDuringSetup) {
       throw StateError("Device disconnected during BLE setup");
     }
   }
 
   bool _sameDevice(String? first, String? second) {
   if (first == null || second == null) return false;
-  return first.toLowerCase() == second.toLowerCase();
+  return kIsWeb ? first == second : first.toLowerCase() == second.toLowerCase();
 }
 
   BleDevice? _connectedDevice;
   bool _isScanning = false;
   final List<BleDevice> _scannedDevices = [];
 
-  Completer<void>? _connectionCompleter;
   bool _connecting = false;
   String? _connectionError;
 
@@ -182,6 +182,7 @@ class _BleImuAppState extends State<BleImuApp> {
   void _initBle() {
     UniversalBle.queueType = QueueType.global;
     UniversalBle.onScanResult = (device) {
+      if (!mounted || !_isScanning) return;
       if (!_scannedDevices.any((d) => d.deviceId == device.deviceId)) {
         setState(() => _scannedDevices.add(device));
       }
@@ -236,14 +237,8 @@ class _BleImuAppState extends State<BleImuApp> {
         "error=${change.error}",
       );
 
-      final completer = _connectionCompleter;
-
       if (change.isConnected) {
         _linkConnected = true;
-
-        if (completer != null && !completer.isCompleted) {
-          completer.complete();
-        }
         return;
       }
 
@@ -254,23 +249,17 @@ class _BleImuAppState extends State<BleImuApp> {
         _connectionLostDuringSetup = true;
       }
 
-      // Some stacks can emit a transient disconnected state while starting.
-      // Reject immediately only when an error is supplied or a link was active.
-      if (completer != null &&
-          !completer.isCompleted &&
-          (change.error != null || wasConnected)) {
-        completer.completeError(
-          StateError(change.error?.toString() ?? "Device disconnected"),
-        );
-      }
-
       if (wasConnected && mounted) {
+        _rawRecordingTimer?.cancel();
         setState(() {
           _connectedDevice = null;
           _latestRawSample = null;
           _latestStatus = null;
+          _recordingRawCsv = false;
           if (_pendingDeviceId == null) _connecting = false;
-          _connectionError = change.error?.toString() ?? "Device disconnected";
+          _connectionError = _disconnecting
+              ? null
+              : change.error?.toString() ?? "Device disconnected";
         });
       }
     };
@@ -317,6 +306,8 @@ Future<void> _startScan() async {
   _scanTimer = Timer(const Duration(seconds: 6), () async {
     try {
       await UniversalBle.stopScan();
+    } catch (error) {
+      debugPrint("Stop scan failed: $error");
     } finally {
       if (mounted) setState(() => _isScanning = false);
     }
@@ -324,7 +315,12 @@ Future<void> _startScan() async {
 }
 
   Future<void> _connect(BleDevice device) async {
-    if (_connecting) return;
+    if (_connecting || _disconnecting || _connectedDevice != null) return;
+    setState(() {
+      _isScanning = false;
+      _connecting = true;
+      _connectionError = null;
+    });
     _scanTimer?.cancel();
 
     try {
@@ -333,36 +329,24 @@ Future<void> _startScan() async {
       // Scanning may already have stopped.
     }
 
+    if (!mounted) return;
     final deviceId = device.deviceId;
-
-    setState(() {
-      _isScanning = false;
-      _connecting = true;
-      _connectionError = null;
-    });
 
     _pendingDeviceId = deviceId;
     _linkConnected = false;
     _connectionLostDuringSetup = false;
-    _connectionCompleter = Completer<void>();
 
     try {
       debugPrint("BLE: connecting to $deviceId");
 
-      await UniversalBle.connect(deviceId).timeout(
-        _isWindows
+      await UniversalBle.connect(
+        deviceId,
+        timeout: _isWindows
             ? const Duration(seconds: 30)
             : const Duration(seconds: 15),
       );
-
-      // Some implementations complete connect() before sending the callback.
-      if (!_linkConnected) {
-        await _connectionCompleter!.future.timeout(
-          _isWindows
-              ? const Duration(seconds: 20)
-              : const Duration(seconds: 10),
-        );
-      }
+      // universal_ble 3.1.1 invokes onConnectionChange synchronously from
+      // updateConnection before connect's event-stream future can resume.
       _ensureSetupConnected();
 
       debugPrint("BLE: physical connection established");
@@ -370,9 +354,11 @@ Future<void> _startScan() async {
       await Future<void>.delayed(_gattDelay);
       _ensureSetupConnected();
 
-      await _retryGattOperation(
-        "Service discovery",
-        () => UniversalBle.discoverServices(deviceId),
+      await UniversalBle.discoverServices(
+        deviceId,
+        timeout: _isWindows
+            ? const Duration(seconds: 20)
+            : const Duration(seconds: 12),
       );
       _ensureSetupConnected();
 
@@ -409,7 +395,8 @@ Future<void> _startScan() async {
       debugPrint("BLE initialization failed: $error\n$stackTrace");
 
       try {
-        await UniversalBle.disconnect(deviceId);
+        await UniversalBle.disconnect(deviceId,
+            timeout: const Duration(seconds: 15));
       } catch (_) {
         // Preserve the original failure.
       }
@@ -423,7 +410,6 @@ Future<void> _startScan() async {
       }
     } finally {
       _pendingDeviceId = null;
-      _connectionCompleter = null;
     }
   }
 
@@ -442,39 +428,6 @@ Future<void> _startScan() async {
 
 
 
-Future<T> _retryGattOperation<T>(
-  String operationName,
-  Future<T> Function() operation, {
-  int attempts = 3,
-}) async {
-  Object? lastError;
-
-  for (var attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await operation().timeout(
-        _isWindows
-            ? const Duration(seconds: 20)
-            : const Duration(seconds: 12),
-      );
-    } catch (error) {
-      lastError = error;
-      debugPrint(
-        "$operationName attempt $attempt/$attempts failed: $error",
-      );
-
-      if (attempt < attempts) {
-        await Future<void>.delayed(
-          Duration(milliseconds: 500 * attempt),
-        );
-      }
-    }
-  }
-
-  throw BleOperationException(
-    operationName,
-    lastError ?? StateError("Unknown BLE error"),
-  );
-}
   // Future<void> _applyEnabledSubscriptions(String deviceId) async {
     // await _setStreamSubscription(
     //   deviceId: deviceId,
@@ -491,6 +444,7 @@ Future<T> _retryGattOperation<T>(
         BleUuids.deviceStatusService,
         BleUuids.statusChar,
       );
+      _ensureSetupConnected();
     }
 
     if (_enabledStreams["auxiliary"] == true) {
@@ -499,6 +453,7 @@ Future<T> _retryGattOperation<T>(
         BleUuids.auxiliaryService,
         BleUuids.auxiliaryChar,
       );
+      _ensureSetupConnected();
     }
 
     if (_enabledStreams["rawImu"] == true) {
@@ -631,17 +586,35 @@ Future<T> _retryGattOperation<T>(
 
 
   Future<void> _disconnect() async {
+    if (_disconnecting) return;
+    final device = _connectedDevice;
+    if (device == null) return;
+    _disconnecting = true;
     _rawRecordingTimer?.cancel();
-
-    if (_connectedDevice != null) {
-      await UniversalBle.disconnect(_connectedDevice!.deviceId);
+    try {
+      await UniversalBle.disconnect(device.deviceId,
+          timeout: const Duration(seconds: 15));
+      final state = await UniversalBle.getConnectionState(device.deviceId,
+          timeout: const Duration(seconds: 5));
+      if (state != BleConnectionState.disconnected) {
+        throw StateError("Device is still connected ($state)");
+      }
+      if (!mounted) return;
       setState(() {
         _connectedDevice = null;
+        _linkConnected = false;
         // _latestSample = null;
         _latestRawSample = null;
+        _latestStatus = null;
         _rawRecording.clear();
         _recordingRawCsv = false;
       });
+    } catch (error) {
+      if (mounted) {
+        setState(() => _connectionError = "Disconnect failed: $error");
+      }
+    } finally {
+      _disconnecting = false;
     }
   }
   @override
@@ -656,9 +629,10 @@ Future<T> _retryGattOperation<T>(
     UniversalBle.onValueChange = null;
     UniversalBle.onConnectionChange = null;
 
-    final device = _connectedDevice;
-    if (device != null) {
-      unawaited(UniversalBle.disconnect(device.deviceId));
+    final deviceId = _connectedDevice?.deviceId ?? _pendingDeviceId;
+    if (deviceId != null && !_disconnecting) {
+      unawaited(UniversalBle.disconnect(deviceId,
+          timeout: const Duration(seconds: 15)));
     }
     super.dispose();
   }
