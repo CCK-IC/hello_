@@ -9,6 +9,8 @@ class SubscriptionOperationGate {
   bool canStart(String key) =>
       !_pending.containsKey(key) && !_uncertain.contains(key);
 
+  bool isUncertain(String key) => _uncertain.contains(key);
+
   Object? begin(String key) {
     if (!canStart(key)) return null;
     final token = Object();

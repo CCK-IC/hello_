@@ -98,3 +98,17 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
 
 - After the user selected XIAO-IMU-RAW in Chrome's Bluetooth picker, the app connected and completed setup. Raw IMU streaming continued for over one minute at a requested 25 Hz; the displayed buffer grew from 111 to 1,888 samples, and the displayed raw rate was 25–26 Hz. No stall was observed during this run.
 - Device status notifications were disabled; dashboard drop counters were not live and must not be interpreted as zero drops. No serial log, sequence-gap total, command, disconnect or reconnect test was captured. Native reliability and the previously observed firmware buffer exhaustion remain unresolved.
+
+## AUX ADC visualization
+
+- Added an AUX v1 decoder and an eight-channel raw-count chart to the dashboard. Enable the auxiliary subscription; notifications require an ATT MTU of at least 25. The 22-byte firmware packet uses signed 16-bit channel values.
+- IMU history duration and ADC history sample limits are selectable. Control selections survive dashboard rebuilds and are reapplied on reconnect.
+- On macOS Chrome, a live sensor delivered all eight ADC channel values; selection and both buffer controls worked. A 14 Hz setting survived scrolling and reconnect, and ADC notifications resumed. The reported drop counter stayed at zero during the observed session. A resized IMU buffer CSV download completed; its contents were not inspected because macOS denied access to Downloads.
+- Android requests a larger MTU before enabling AUX; this and Windows/native BLE remain unverified on hardware. Web, Windows and macOS manage MTU outside the app.
+- Ten automated tests and the web build passed after the MTU and partial slow-mode failure fixes. On the final build, the identified ADC test sensor connected after a fresh scan, displayed all eight ADC channels, and stayed connected while slow mode was toggled on and off. The rate returned to 10 Hz and the drop counter remained zero. Two XIAO-IMU-RAW devices appeared in Chrome, so verify the selected device. The ADC values observed were static; electrical input changes were not tested.
+
+## Windows and Mac integration, 2026-10-30
+
+- Integrated Windows app commit `47e79cb` with the Mac ADC, buffer and persistent-control changes. The last successfully sent rate now survives dashboard rebuilds and resets for each new connection. A timed-out raw unsubscribe resumes stall monitoring while blocking further changes until reconnect.
+- On the Mac, 23 VM tests passed, including a simulated unsubscribe-timeout regression, as did the Chrome chooser test. The web release build passed. Flutter analysis reports the same six pre-existing warning/info findings.
+- The combined build has not been tested with BLE hardware. Windows native disconnects and the firmware buffer exhaustion documented above remain unresolved; the tests do not establish Windows hardware stability.

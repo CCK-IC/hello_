@@ -8,11 +8,13 @@ import 'package:flutter/material.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 import "models/raw_imu_history.dart";
+import "models/adc_history.dart";
 import "models/protocol.dart";
 import "models/ble_stream_diagnostics.dart";
 import "models/subscription_operation_gate.dart";
 import "models/raw_stream_watchdog.dart";
 import "widgets/raw_imu_chart.dart";
+import "widgets/adc_chart.dart";
 // import 'widgets/imu_3d_view.dart';
 // import 'widgets/euler_chart.dart';
 import 'widgets/control_panel.dart';
@@ -113,8 +115,8 @@ class _BleImuAppState extends State<BleImuApp> {
 
   DateTime _lastHistoryPrune = DateTime.fromMillisecondsSinceEpoch(0);
 
-  void _pruneRawHistory(DateTime now) {
-    if (now.difference(_lastHistoryPrune) < const Duration(seconds: 1)) {
+  void _pruneRawHistory(DateTime now, {bool force = false}) {
+    if (!force && now.difference(_lastHistoryPrune) < const Duration(seconds: 1)) {
       return;
     }
 
@@ -155,7 +157,6 @@ class _BleImuAppState extends State<BleImuApp> {
 
   bool _connecting = false;
   String? _connectionError;
-  int? _initialRateSetByApp;
 
   final Map<String, bool> _enabledStreams = {
     "quaternion": true,
@@ -165,7 +166,10 @@ class _BleImuAppState extends State<BleImuApp> {
   };
 
   final List<RawImuHistoryPoint> _rawHistory = [];
-  static const Duration _rawHistoryRetention = Duration(minutes: 10);
+  Duration _rawHistoryRetention = const Duration(minutes: 10);
+  final AdcHistory _adcHistory = AdcHistory();
+  int _invalidAdcPacketCount = 0;
+  late final ControlPanelController _controlPanelController;
 
   final Set<RawSensorType> _selectedRawSensors = {
     RawSensorType.accelerometer,
@@ -199,6 +203,9 @@ class _BleImuAppState extends State<BleImuApp> {
         setState(() => _rawStreamStalled = stalled);
       }
     });
+    _controlPanelController = ControlPanelController(
+      requestedRate: _isMacChrome ? 10 : (_isWindows ? 25 : 100),
+    );
     // Windows peers have stalled while enabling the status CCC. Keep the
     // connection usable and let the user opt in to status notifications.
     if (_isWindows) _enabledStreams["status"] = false;
@@ -251,6 +258,9 @@ class _BleImuAppState extends State<BleImuApp> {
           _streamDiagnostics.record(data.value, DateTime.now());
         }
         _handleRawValue(data.value);
+      } else if (characteristic == BleUuids.auxiliaryChar.toLowerCase()) {
+        if (!_adcHistory.addPacket(data.value)) _invalidAdcPacketCount++;
+        _scheduleUiRefresh();
       } else if (characteristic == BleUuids.statusChar.toLowerCase()) {
         final status = DeviceStatus.decode(data.value);
         if (status != null) {
@@ -362,6 +372,8 @@ Future<void> _startScan() async {
 
   Future<void> _connect(BleDevice device) async {
     if (_connecting || _disconnecting || _connectedDevice != null) return;
+    _controlPanelController.restorePendingSelections();
+    _controlPanelController.clearLastRateSet();
     setState(() {
       _isScanning = false;
       _connecting = true;
@@ -379,9 +391,10 @@ Future<void> _startScan() async {
     final deviceId = device.deviceId;
 
     _pendingDeviceId = deviceId;
+    _adcHistory.clear();
+    _invalidAdcPacketCount = 0;
     _linkConnected = false;
     _connectionLostDuringSetup = false;
-    _initialRateSetByApp = null;
 
     try {
       if (_bleDiagnosticsEnabled) _streamDiagnostics.reset();
@@ -414,19 +427,25 @@ Future<void> _startScan() async {
 
       await Future<void>.delayed(_gattDelay);
       _ensureSetupConnected();
-      if ((_isWindows || _isMacChrome) &&
-          _enabledStreams["rawImu"] == true) {
-        final initialRateHz = _isMacChrome ? 10 : 25;
-        debugPrint("BLE: setting initial raw stream rate to $initialRateHz Hz");
+      final setupCommands = <BleControlCommand>[
+        if (_controlPanelController.slowMode) SetSlowModeCommand(true),
+        SetRateCommand(_controlPanelController.requestedRate.toInt()),
+        SetStatusPeriodCommand(_controlPanelController.statusPeriodMs.toInt()),
+      ];
+      for (final command in setupCommands) {
         await UniversalBle.write(
           deviceId,
           BleUuids.deviceStatusService,
           BleUuids.controlChar,
-          Uint8List.fromList([0x01, initialRateHz, 0]),
+          command.serialize(),
           timeout: const Duration(seconds: 15),
         );
         _ensureSetupConnected();
-        _initialRateSetByApp = initialRateHz;
+        if (command is SetRateCommand) {
+          _controlPanelController.markRateRestored(command.rateHz);
+        }
+        await Future<void>.delayed(_gattDelay);
+        _ensureSetupConnected();
       }
       await _applyEnabledSubscriptions(deviceId);
       _ensureSetupConnected();
@@ -498,6 +517,8 @@ Future<void> _startScan() async {
     }
 
     if (_enabledStreams["auxiliary"] == true) {
+      await _prepareAuxiliaryMtu(deviceId);
+      _ensureSetupConnected();
       await _subscribe(
         deviceId,
         BleUuids.auxiliaryService,
@@ -512,6 +533,17 @@ Future<void> _startScan() async {
         BleUuids.imuService,
         BleUuids.rawImuChar,
       );
+    }
+  }
+
+  Future<void> _prepareAuxiliaryMtu(String deviceId) async {
+    // Android can request an MTU; other platforms negotiate it themselves.
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      final mtu = await UniversalBle.requestMtu(
+        deviceId, 128, timeout: const Duration(seconds: 15));
+      if (mtu < 25) {
+        throw StateError("ADC requires BLE MTU 25 or greater (negotiated $mtu)");
+      }
     }
   }
 
@@ -616,6 +648,9 @@ Future<void> _startScan() async {
     }
 
     try {
+      if (key == "auxiliary" && enabled) {
+        await _prepareAuxiliaryMtu(device.deviceId);
+      }
       await _setSubscription(
         device.deviceId, serviceUuid, characteristicUuid, enabled);
 
@@ -641,7 +676,7 @@ Future<void> _startScan() async {
 
       setState(() {
         _enabledStreams[key] = previous;
-        if (key == "rawImu" && previous && !timedOut) _startRawWatchdog();
+        if (key == "rawImu" && previous) _startRawWatchdog();
         _connectionError = timedOut
             ? "The $key subscription timed out and may still be changing. "
                 "Disconnect and reconnect before changing it again."
@@ -705,6 +740,7 @@ Future<void> _startScan() async {
     UniversalBle.onScanResult = null;
     UniversalBle.onValueChange = null;
     UniversalBle.onConnectionChange = null;
+    _controlPanelController.dispose();
 
     final deviceId = _connectedDevice?.deviceId ?? _pendingDeviceId;
     if (deviceId != null && !_disconnecting) {
@@ -725,6 +761,21 @@ Future<void> _startScan() async {
       payload,
       timeout: const Duration(seconds: 15),
     );
+    // Firmware changes the rate when slow mode is toggled. Restore the chosen
+    // rate so the slider and device continue to agree.
+    if (cmd is SetSlowModeCommand) {
+      try {
+        await UniversalBle.write(
+          deviceId,
+          BleUuids.deviceStatusService,
+          BleUuids.controlChar,
+          SetRateCommand(_controlPanelController.requestedRate.toInt()).serialize(),
+          timeout: const Duration(seconds: 15),
+        );
+      } catch (error) {
+        throw SlowModeRateWriteException(error);
+      }
+    }
 
     if (!mounted) return;
     setState(() {
@@ -896,11 +947,13 @@ Future<void> _startScan() async {
       final statusAndControlsColumn = ListView(
         children: [
           if (_rawStreamStalled)
-            const Padding(
-              padding: EdgeInsets.all(8),
+            Padding(
+              padding: const EdgeInsets.all(8),
               child: Text(
-                "Raw notifications have stopped. The device may be disconnected; disconnect and reconnect to retry.",
-                style: TextStyle(color: Colors.red),
+                _subscriptionGate.isUncertain("rawImu")
+                    ? "Raw notifications have stopped. The subscription state is uncertain after a timeout; disconnect and reconnect to retry."
+                    : "Raw notifications have stopped. The device may be disconnected; disconnect and reconnect to retry.",
+                style: const TextStyle(color: Colors.red),
               ),
             ),
           if (_connectionError != null)
@@ -1163,6 +1216,30 @@ Future<void> _startScan() async {
                   const SizedBox(height: 8),
                   Wrap(
                     spacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const Text("IMU history buffer"),
+                      DropdownButton<int>(
+                        value: _rawHistoryRetention.inMinutes,
+                        items: const [
+                          DropdownMenuItem(value: 1, child: Text("1 minute")),
+                          DropdownMenuItem(value: 5, child: Text("5 minutes")),
+                          DropdownMenuItem(value: 10, child: Text("10 minutes")),
+                          DropdownMenuItem(value: 30, child: Text("30 minutes")),
+                          DropdownMenuItem(value: 60, child: Text("60 minutes")),
+                        ],
+                        onChanged: (minutes) {
+                          if (minutes == null) return;
+                          setState(() {
+                            _rawHistoryRetention = Duration(minutes: minutes);
+                            _pruneRawHistory(DateTime.now(), force: true);
+                          });
+                        },
+                      ),
+                    ],
+                  ),
+                  Wrap(
+                    spacing: 8,
                     runSpacing: 8,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
@@ -1324,10 +1401,50 @@ Future<void> _startScan() async {
               ),
             ),
           ),
+          Card(
+            color: const Color.fromARGB(255, 121, 138, 182),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (!_enabledStreams["auxiliary"]!)
+                    const Text("Enable Auxiliary sensor above to receive ADC data."),
+                  if (_enabledStreams["auxiliary"]! && _adcHistory.isEmpty)
+                    const Text("ADC notifications require a negotiated BLE MTU of at least 25."),
+                  Wrap(
+                    spacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const Text("ADC history buffer"),
+                      DropdownButton<int>(
+                        value: _adcHistory.maxSamples,
+                        items: const [
+                          DropdownMenuItem(value: 1000, child: Text("1,000 samples")),
+                          DropdownMenuItem(value: 6000, child: Text("6,000 samples")),
+                          DropdownMenuItem(value: 30000, child: Text("30,000 samples")),
+                          DropdownMenuItem(value: 120000, child: Text("120,000 samples")),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) setState(() => _adcHistory.maxSamples = value);
+                        },
+                      ),
+                    ],
+                  ),
+                  AdcChart(
+                    history: _adcHistory.pointsSince(DateTime.now().subtract(_rawChartPeriod)),
+                    visiblePeriod: _rawChartPeriod,
+                  ),
+                  if (_invalidAdcPacketCount > 0)
+                    Text("Rejected ADC packets: $_invalidAdcPacketCount"),
+                ],
+              ),
+            ),
+          ),
           ControlPanel(
             onSendCommand: _sendCommand,
             commandHistory: _commandHistory,
-            initialRateHz: _initialRateSetByApp,
+            controller: _controlPanelController,
           ),
         ],
       );
@@ -1384,8 +1501,17 @@ Future<void> _startScan() async {
   }
 
   Future<void> _saveRawBufferCsv() async {
+    _pruneRawHistory(DateTime.now(), force: true);
+    if (mounted) setState(() {});
     final samples = List<RawImuHistoryPoint>.from(_rawHistory);
-    if (samples.isEmpty) return;
+    if (samples.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("No IMU samples in the selected buffer period.")),
+        );
+      }
+      return;
+    }
     await _saveRawCsv(samples, samples.first.receivedAt, "raw_imu_buffer");
   }
 

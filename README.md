@@ -148,9 +148,8 @@ The AUX characteristic UUID is:
 8f7c0011-4f54-4d55-8000-5849414f494d
 ```
 
-AUX v1 is a fixed-size, explicitly encoded binary packet containing IMU status,  timestamp, Packet sequence #,
-Accelerometer - X, Accelerometer - Y, Accelerometer - Z,
-Gyroscope - X, Gyroscope - Y, Gyroscope - Z,
+AUX v1 is a 22-byte packet containing a sequence number, timestamp, and eight
+signed ADC channel counts. Notifications require an ATT MTU of at least 25.
 
 ## Complete packet layout
 
@@ -158,12 +157,12 @@ Gyroscope - X, Gyroscope - Y, Gyroscope - Z,
 |---:|---:|---|---|---|
 | 0 | 1 | `uint8` | Format version |
 | 1 | 1 | `uint8` |Packet sequence # | 
-| 2 | 2 | `uint32_le` |Packet Timestamp in milliseconds |
-| 6 | 4 | `uint16_le` | ADC CH1 value |
-| 8 | 2 | `uint16_le` | ADC CH2 value |
-| 10 | 2 | `uint16_le` | ADC CH3 value  |
-| 12 | 2 | `uint16_le` | ADC CH4 value  |
-| 14 | 2 | `uint16_le` | ADC CH5 value | 
-| 16 | 2 | `uint16_le` | ADC CH6 value |
-| 18 | 2 | `uint16_le` | ADC CH7 value |
-| 20 | 2 | `uint16_le` | ADC CH8 value |
+| 2 | 4 | `uint32_le` | Packet timestamp in milliseconds |
+| 6 | 2 | `int16_le` | ADC CH1 value |
+| 8 | 2 | `int16_le` | ADC CH2 value |
+| 10 | 2 | `int16_le` | ADC CH3 value |
+| 12 | 2 | `int16_le` | ADC CH4 value |
+| 14 | 2 | `int16_le` | ADC CH5 value |
+| 16 | 2 | `int16_le` | ADC CH6 value |
+| 18 | 2 | `int16_le` | ADC CH7 value |
+| 20 | 2 | `int16_le` | ADC CH8 value |
