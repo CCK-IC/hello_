@@ -2,6 +2,8 @@
 
 A new Flutter project.
 
+Current cross-machine progress and next steps: [HANDOFF.md](HANDOFF.md).
+
 
 **BLE packet formatting**
 ---
