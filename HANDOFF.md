@@ -112,3 +112,41 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
 - Integrated Windows app commit `47e79cb` with the Mac ADC, buffer and persistent-control changes. The last successfully sent rate now survives dashboard rebuilds and resets for each new connection. A timed-out raw unsubscribe resumes stall monitoring while blocking further changes until reconnect.
 - On the Mac, 23 VM tests passed, including a simulated unsubscribe-timeout regression, as did the Chrome chooser test. The web release build passed. Flutter analysis reports the same six pre-existing warning/info findings.
 - The combined build has not been tested with BLE hardware. Windows native disconnects and the firmware buffer exhaustion documented above remain unresolved; the tests do not establish Windows hardware stability.
+
+## Windows native crash reproduction, 2026-10-30
+
+- User reported that the native window closes during connection in VS Code debug mode. No corresponding Application Error or Windows Error Reporting event or local crash dump was found.
+- At app commit 5b778a6, flutter run -d windows --dart-define=BLE_DIAGNOSTICS=true connected to the sensor, streamed 2,062 raw packets over about 82 seconds with zero inferred gaps, disconnected and reconnected successfully. The session was stopped normally with exit code 0. The reported intermittent crash was not reproduced.
+- Flutter emitted repeated AXTree accessibility update errors after computer-use accessibility inspection. The client remained open; whether those errors relate to the reported crash is unknown. Capture a failing VS Code Debug Console log and the exact trigger before making a targeted fix.
+- flutter test --no-pub: 23 tests passed. This does not establish that the native crash is fixed.
+
+- Further native debug stress testing on 2026-10-30: two reconnects succeeded; with raw, auxiliary and status enabled and a requested 98 Hz, the app remained open for over 30 seconds, then reconnected successfully at high load. The firmware drop counter rose to 236 and app diagnostics showed 31 inferred gaps before reconnect. This demonstrates packet loss at high load; it did not reproduce the reported window-close crash.
+
+## Windows crash investigation, 2026-11-01
+
+- User supplied VS Code output showing Flutter accessibility_bridge.cc(114) AXTree update errors (orphan nodes and nodes left pending), followed by `Lost connection to device` and `Exited`. No exception code or stack was provided. Earlier controlled runs showed the same AXTree errors without a process exit, so causality remains unconfirmed.
+- Flutter upstream issues #182444 and #190357 describe related Windows accessibility tree failures; the app does not match their exact reproductions. Do not disable accessibility as a speculative fix.
+- No matching Windows Application Error/WER events or local crash dumps found. On 2026-10-30 a native stress run with three streams and requested 98 Hz stayed open and reconnected; firmware drop counter rose to 236 and 31 sequence gaps were inferred. On 2026-11-01 the Windows debug executable built, but native computer-use was unavailable and no new hardware run completed. The crash remains unresolved.
+
+## Single-glove live IMU analysis, 2026-11-01
+
+- Added a live analysis page, accessible from the connected dashboard. It
+  receives a separate session-scoped raw stream, clears on connection changes
+  and hides estimates when samples stop. The user can choose accelerometer or
+  gyroscope data and edit two exploratory search bands.
+- Frequency candidates use an 8-second device-timestamp window, linear
+  resampling for minor timing variation, per-axis mean removal and Hann
+  windowing, and combined XYZ spectral power. Long gaps and invalid samples
+  are rejected. Peak-visibility guards are heuristic, not clinical thresholds.
+  No diagnostic, technique-quality or treatment-effectiveness claim is made.
+- Displayed sample rate and Nyquist limit refer to the received data. The
+  search stops below Nyquist; physical aliasing, firmware filtering, harmonics
+  and measurement accuracy remain unvalidated. Default bands are exploratory
+  placeholders, not clinically established frequency ranges.
+- 37 Flutter VM tests passed, including synthetic signals and a mocked BLE
+  connection-to-analysis flow. The web release build passed. Flutter analysis
+  reported the same six pre-existing diagnostics. The user declined live
+  hardware testing for this run; accuracy and the native crash remain unverified.
+- Windows release build was attempted but did not complete; it was stopped after
+  stalling. No hardware run was performed. Re-run the Windows build and test
+  with the sensor when available.

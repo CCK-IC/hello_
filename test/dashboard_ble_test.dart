@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:math' as math;
 
 import 'package:ble_imu_visualizer/main.dart';
 import 'package:ble_imu_visualizer/models/protocol.dart';
@@ -79,6 +80,48 @@ Uint8List _auxPacket(int sequence, List<int> channels) {
 }
 
 void main() {
+  testWidgets('analysis page receives live packets from the connected device',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final ble = _FakeBlePlatform();
+    UniversalBle.setInstance(ble);
+    await tester.pumpWidget(const MaterialApp(home: BleImuApp()));
+    await tester.tap(find.byIcon(Icons.search));
+    await tester.pump();
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: 'Test IMU'));
+    await tester.pump();
+    await tester.tap(find.text('CONNECT'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.analytics_outlined));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('IMU frequency analysis'), findsOneWidget);
+
+    for (var i = 0; i < 151; i++) {
+      final data = ByteData(20)
+        ..setUint8(0, 2)
+        ..setUint8(1, 7)
+        ..setUint16(2, i, Endian.little)
+        ..setUint32(4, i * 40, Endian.little)
+        ..setInt16(8, (1000 * math.sin(2 * math.pi * 2 * i / 25)).round(), Endian.little);
+      ble.updateCharacteristicValue(_deviceId, BleUuids.rawImuChar,
+          data.buffer.asUint8List(), null);
+    }
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('Observed sample rate: 25.0 Hz'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Candidate spectral peaks'), 300,
+        scrollable: find.byType(Scrollable).last);
+    expect(find.text('1.99 Hz candidate'), findsOneWidget);
+    ble.updateConnection(_deviceId, false);
+    await tester.pump();
+    expect(find.text('1.99 Hz candidate'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'dashboard receives AUX notifications and clears them on reconnect',
       (tester) async {

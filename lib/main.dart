@@ -15,6 +15,7 @@ import "models/subscription_operation_gate.dart";
 import "models/raw_stream_watchdog.dart";
 import "widgets/raw_imu_chart.dart";
 import "widgets/adc_chart.dart";
+import "widgets/imu_analysis_page.dart";
 // import 'widgets/imu_3d_view.dart';
 // import 'widgets/euler_chart.dart';
 import 'widgets/control_panel.dart';
@@ -104,6 +105,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
     _latestRawSample = sample;
     _rawHistory.add(point);
+    _analysisSamples.add(point);
 
     if (_recordingRawCsv) {
       _rawRecording.add(point);
@@ -166,6 +168,8 @@ class _BleImuAppState extends State<BleImuApp> {
   };
 
   final List<RawImuHistoryPoint> _rawHistory = [];
+  final StreamController<RawImuHistoryPoint?> _analysisSamples =
+      StreamController<RawImuHistoryPoint?>.broadcast(sync: true);
   Duration _rawHistoryRetention = const Duration(minutes: 10);
   final AdcHistory _adcHistory = AdcHistory();
   int _invalidAdcPacketCount = 0;
@@ -292,6 +296,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
       final wasConnected = _linkConnected;
       _linkConnected = false;
+      if (wasConnected) _analysisSamples.add(null);
       _stopRawWatchdog();
       if (wasConnected) _subscriptionGate.reset();
       if (_sameDevice(_pendingDeviceId, change.deviceId) &&
@@ -391,6 +396,7 @@ Future<void> _startScan() async {
     final deviceId = device.deviceId;
 
     _pendingDeviceId = deviceId;
+    _analysisSamples.add(null);
     _adcHistory.clear();
     _invalidAdcPacketCount = 0;
     _linkConnected = false;
@@ -707,6 +713,7 @@ Future<void> _startScan() async {
       setState(() {
         _connectedDevice = null;
         _linkConnected = false;
+        _analysisSamples.add(null);
         _subscriptionGate.reset();
         // _latestSample = null;
         _latestRawSample = null;
@@ -736,6 +743,7 @@ Future<void> _startScan() async {
      _uiRefreshTimer?.cancel();
     _bleDataSubscription?.cancel();
     _bleDataController.close();
+    _analysisSamples.close();
 
     UniversalBle.onScanResult = null;
     UniversalBle.onValueChange = null;
@@ -791,6 +799,19 @@ Future<void> _startScan() async {
         title: const Text("IMU BLE 3D Attitude Monitor"),
         backgroundColor: const Color.fromARGB(255, 134, 152, 201),
         actions: [
+          if (_connectedDevice != null)
+            Semantics(
+              label: "Analyze IMU data",
+              button: true,
+              child: IconButton(
+                icon: const Icon(Icons.analytics_outlined),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ImuAnalysisPage(samples: _analysisSamples.stream),
+                  ),
+                ),
+              ),
+            ),
           if (_connectedDevice == null)
             IconButton(
               icon: Icon(_isScanning && !kIsWeb ? Icons.stop : Icons.search),
