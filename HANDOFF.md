@@ -150,3 +150,24 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
 - Windows release build was attempted but did not complete; it was stopped after
   stalling. No hardware run was performed. Re-run the Windows build and test
   with the sensor when available.
+
+## Frequency history and recording, 2026-11-02
+
+- The live analysis page plots candidate peaks for selected percussion and
+  vibration search bands. Display duration (10 s to 5 min) and retained
+  frequency-history duration (1 to 60 min, capped at 3600 estimates) are
+  independently selectable. Plot lines break across missing estimates,
+  timing gaps, sensor changes and band changes. History is page/session scoped.
+- Each point is an overlapping 8-second frequency estimate, logged at most
+  once per second when a new raw sample arrived. Gaps are not replaced by zero.
+  CSV exports store estimate time, sensor, band settings, sample rate, quality
+  and unavailable reasons. Timed recordings can be stopped early; partial
+  data is retained on the page when the connection ends.
+- Full Flutter VM suite passed 44 tests; the subsequent automatic-recording
+  test and related page/CSV tests also passed. Web release build passed.
+  Analysis has the same six pre-existing lint findings. Physical glove and
+  Windows-native crash behavior were not re-tested in this change.
+- Frequency candidates now appear in large result tiles above the band
+  settings, side by side on wide layouts and stacked on narrow screens.
+  Waiting and unavailable states remain explicit. Targeted layout and
+  mocked BLE integration tests passed; no new hardware run was performed.

@@ -104,19 +104,20 @@ void main() {
         ..setUint8(1, 7)
         ..setUint16(2, i, Endian.little)
         ..setUint32(4, i * 40, Endian.little)
-        ..setInt16(8, (1000 * math.sin(2 * math.pi * 2 * i / 25)).round(), Endian.little);
-      ble.updateCharacteristicValue(_deviceId, BleUuids.rawImuChar,
-          data.buffer.asUint8List(), null);
+        ..setInt16(8, (1000 * math.sin(2 * math.pi * 2 * i / 25)).round(),
+            Endian.little);
+      ble.updateCharacteristicValue(
+          _deviceId, BleUuids.rawImuChar, data.buffer.asUint8List(), null);
     }
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('Observed sample rate: 25.0 Hz'), findsOneWidget);
     await tester.scrollUntilVisible(find.text('Candidate spectral peaks'), 300,
         scrollable: find.byType(Scrollable).last);
-    expect(find.text('1.99 Hz candidate'), findsOneWidget);
+    expect(find.text('1.99 Hz'), findsOneWidget);
     ble.updateConnection(_deviceId, false);
     await tester.pump();
-    expect(find.text('1.99 Hz candidate'), findsNothing);
+    expect(find.text('1.99 Hz'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     expect(tester.takeException(), isNull);
