@@ -11,6 +11,7 @@ import "models/raw_imu_history.dart";
 import "models/adc_history.dart";
 import "models/protocol.dart";
 import "models/ble_stream_diagnostics.dart";
+import "models/ble_command_diagnostics.dart";
 import "models/subscription_operation_gate.dart";
 import "models/raw_stream_watchdog.dart";
 import "widgets/raw_imu_chart.dart";
@@ -140,6 +141,7 @@ class _BleImuAppState extends State<BleImuApp> {
   bool _linkConnected = false;
   bool _connectionLostDuringSetup = false;
   bool _disconnecting = false;
+  int _commandGeneration = 0;
   final _subscriptionGate = SubscriptionOperationGate();
 
   void _ensureSetupConnected() {
@@ -296,6 +298,10 @@ class _BleImuAppState extends State<BleImuApp> {
 
       final wasConnected = _linkConnected;
       _linkConnected = false;
+      if (wasConnected) {
+        _commandGeneration++;
+        _controlPanelController.clearLastRateSet();
+      }
       if (wasConnected) _analysisSamples.add(null);
       _stopRawWatchdog();
       if (wasConnected) _subscriptionGate.reset();
@@ -377,6 +383,7 @@ Future<void> _startScan() async {
 
   Future<void> _connect(BleDevice device) async {
     if (_connecting || _disconnecting || _connectedDevice != null) return;
+    _commandGeneration++;
     _controlPanelController.restorePendingSelections();
     _controlPanelController.clearLastRateSet();
     setState(() {
@@ -439,17 +446,19 @@ Future<void> _startScan() async {
         SetStatusPeriodCommand(_controlPanelController.statusPeriodMs.toInt()),
       ];
       for (final command in setupCommands) {
-        await UniversalBle.write(
-          deviceId,
-          BleUuids.deviceStatusService,
-          BleUuids.controlChar,
-          command.serialize(),
-          timeout: const Duration(seconds: 15),
-        );
-        _ensureSetupConnected();
-        if (command is SetRateCommand) {
-          _controlPanelController.markRateRestored(command.rateHz);
-        }
+        await runLoggedBleCommand(command.name, () async {
+          await UniversalBle.write(
+            deviceId,
+            BleUuids.deviceStatusService,
+            BleUuids.controlChar,
+            command.serialize(),
+            timeout: const Duration(seconds: 15),
+          );
+          _ensureSetupConnected();
+          if (command is SetRateCommand) {
+            _controlPanelController.markRateRestored(command.rateHz);
+          }
+        }, enabled: _bleDiagnosticsEnabled);
         await Future<void>.delayed(_gattDelay);
         _ensureSetupConnected();
       }
@@ -699,6 +708,8 @@ Future<void> _startScan() async {
     final device = _connectedDevice;
     if (device == null) return;
     _disconnecting = true;
+    _commandGeneration++;
+    _controlPanelController.clearLastRateSet();
     _stopRawWatchdog();
     _rawRecordingTimer?.cancel();
     try {
@@ -759,36 +770,48 @@ Future<void> _startScan() async {
   }
 
   Future<void> _sendCommand(BleControlCommand cmd) async {
-    if (_connectedDevice == null) throw Exception("Device not connected");
-    final payload = cmd.serialize();
-    final deviceId = _connectedDevice!.deviceId;
-    await UniversalBle.write(
-      deviceId,
-      BleUuids.deviceStatusService,
-      BleUuids.controlChar,
-      payload,
-      timeout: const Duration(seconds: 15),
-    );
-    // Firmware changes the rate when slow mode is toggled. Restore the chosen
-    // rate so the slider and device continue to agree.
-    if (cmd is SetSlowModeCommand) {
-      try {
-        await UniversalBle.write(
-          deviceId,
-          BleUuids.deviceStatusService,
-          BleUuids.controlChar,
-          SetRateCommand(_controlPanelController.requestedRate.toInt()).serialize(),
-          timeout: const Duration(seconds: 15),
-        );
-      } catch (error) {
-        throw SlowModeRateWriteException(error);
+    return runLoggedBleCommand(cmd.name, () async {
+      if (_connectedDevice == null) throw Exception("Device not connected");
+      final payload = cmd.serialize();
+      final deviceId = _connectedDevice!.deviceId;
+      final generation = _commandGeneration;
+      void ensureCurrentConnection() {
+        if (!mounted || _disconnecting || !_linkConnected ||
+            generation != _commandGeneration ||
+            !_sameDevice(deviceId, _connectedDevice?.deviceId)) {
+          throw StateError("Connection changed while sending command");
+        }
       }
-    }
+      await UniversalBle.write(
+        deviceId,
+        BleUuids.deviceStatusService,
+        BleUuids.controlChar,
+        payload,
+        timeout: const Duration(seconds: 15),
+      );
+      ensureCurrentConnection();
+      // Firmware changes the rate when slow mode is toggled. Restore the chosen
+      // rate so the slider and device continue to agree.
+      if (cmd is SetSlowModeCommand) {
+        try {
+          await UniversalBle.write(
+            deviceId,
+            BleUuids.deviceStatusService,
+            BleUuids.controlChar,
+            SetRateCommand(_controlPanelController.requestedRate.toInt()).serialize(),
+            timeout: const Duration(seconds: 15),
+          );
+          ensureCurrentConnection();
+        } catch (error) {
+          throw SlowModeRateWriteException(error);
+        }
+      }
 
-    if (!mounted) return;
-    setState(() {
-      _commandHistory.add("[${DateTime.now().toIso8601String().substring(11, 19)}] ${cmd.name}");
-    });
+      if (!mounted) return;
+      setState(() {
+        _commandHistory.add("[${DateTime.now().toIso8601String().substring(11, 19)}] ${cmd.name}");
+      });
+    }, enabled: _bleDiagnosticsEnabled);
   }
 
   @override
