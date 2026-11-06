@@ -117,7 +117,7 @@ void main() {
     // A stale gesture callback must not change the disabled slider either.
     rate.onChanged!(175);
     await tester.pump();
-    expect(controller.requestedRate, 100);
+    expect(controller.requestedRate, 45);
     pending.complete();
     await tester.pump();
   });

@@ -30,6 +30,27 @@ RawImuHistoryPoint sample(int index, DateTime start) {
 }
 
 void main() {
+  testWidgets('initial band controls match the analysis defaults',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final samples = StreamController<RawImuHistoryPoint?>(sync: true);
+    await tester.pumpWidget(
+        MaterialApp(home: ImuAnalysisPage(samples: samples.stream)));
+    for (final entry in {
+      'Percussion min': 1.0,
+      'Percussion max': 5.0,
+      'Vibration min': 6.5,
+      'Vibration max': 10.0,
+    }.entries) {
+      final field =
+          tester.widget<TextField>(find.widgetWithText(TextField, entry.key));
+      expect(double.parse(field.controller!.text), entry.value);
+    }
+    await tester.pumpWidget(const SizedBox());
+    unawaited(samples.close());
+  });
+
   testWidgets('frequency results use two columns and stack on narrow screens',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 1600));
@@ -175,6 +196,8 @@ void main() {
     expect(rows.first, contains('estimate_time_utc'));
     expect(rows[1], contains('accelerometer'));
     expect(rows[1], contains('Percussion band'));
+    expect(rows[1], contains('Percussion band,1.0,5.0,'));
+    expect(rows[2], contains('Vibration band,6.5,10.0,'));
     await tester.pumpWidget(const SizedBox());
     unawaited(samples.close());
   });

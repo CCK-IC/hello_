@@ -47,8 +47,8 @@ class ImuFrequencyAnalysis {
 /// rotation; it is not a diagnosis or a count of therapeutic actions.
 class ImuFrequencyAnalyzer {
   static const defaultBands = <FrequencyBand>[
-    FrequencyBand('Lower band', 0.5, 5),
-    FrequencyBand('Higher band', 5, 12),
+    FrequencyBand('Lower band', 1, 5),
+    FrequencyBand('Higher band', 6.5, 10),
   ];
 
   static ImuFrequencyAnalysis analyze(

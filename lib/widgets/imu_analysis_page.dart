@@ -51,10 +51,14 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   RawImuHistoryPoint? _lastLoggedSample;
   bool _gapLogged = false;
   RawSensorType _sensor = RawSensorType.accelerometer;
-  final _lowerMin = TextEditingController(text: '0.5');
-  final _lowerMax = TextEditingController(text: '5');
-  final _upperMin = TextEditingController(text: '5');
-  final _upperMax = TextEditingController(text: '12');
+  final _lowerMin = TextEditingController(
+      text: ImuFrequencyAnalyzer.defaultBands[0].minHz.toString());
+  final _lowerMax = TextEditingController(
+      text: ImuFrequencyAnalyzer.defaultBands[0].maxHz.toString());
+  final _upperMin = TextEditingController(
+      text: ImuFrequencyAnalyzer.defaultBands[1].minHz.toString());
+  final _upperMax = TextEditingController(
+      text: ImuFrequencyAnalyzer.defaultBands[1].maxHz.toString());
   late List<FrequencyBand> _bands;
   StreamSubscription<RawImuHistoryPoint?>? _subscription;
   Timer? _timer;
@@ -67,9 +71,15 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   @override
   void initState() {
     super.initState();
-    _bands = const [
-      FrequencyBand('Percussion band', 0.5, 5),
-      FrequencyBand('Vibration band', 5, 12),
+    _bands = [
+      FrequencyBand(
+          'Percussion band',
+          ImuFrequencyAnalyzer.defaultBands[0].minHz,
+          ImuFrequencyAnalyzer.defaultBands[0].maxHz),
+      FrequencyBand(
+          'Vibration band',
+          ImuFrequencyAnalyzer.defaultBands[1].minHz,
+          ImuFrequencyAnalyzer.defaultBands[1].maxHz),
     ];
     _listen();
     _timer = Timer.periodic(

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../models/protocol.dart';
 
+const double defaultRequestedRateHz = 45;
+
 /// The slow-mode write succeeded, but restoring the selected rate failed.
 /// Throw only after the first write completes successfully.
 class SlowModeRateWriteException implements Exception {
@@ -15,7 +17,7 @@ class SlowModeRateWriteException implements Exception {
 /// Values represent user selections, not acknowledged peripheral settings.
 class ControlPanelController extends ChangeNotifier {
   ControlPanelController({
-    double requestedRate = 100,
+    double requestedRate = defaultRequestedRateHz,
     double statusPeriodMs = 1000,
     bool slowMode = false,
     int? lastRateSetByApp,
@@ -155,7 +157,7 @@ class _ControlPanelState extends State<ControlPanel> {
   void _attachController() {
     _controller = widget.controller ??
         ControlPanelController(
-          requestedRate: (widget.initialRateHz ?? 25).toDouble(),
+          requestedRate: widget.initialRateHz?.toDouble() ?? defaultRequestedRateHz,
           lastRateSetByApp: widget.initialRateHz,
         );
     _controller.addListener(_onValuesChanged);

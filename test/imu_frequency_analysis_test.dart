@@ -48,6 +48,14 @@ List<RawImuHistoryPoint> signal(
     ];
 
 void main() {
+  test('default search bands use the requested frequency ranges', () {
+    final result = ImuFrequencyAnalyzer.analyze(signal());
+    expect(result.bands.map((b) => [b.band.minHz, b.band.maxHz]), [
+      [1, 5],
+      [6.5, 10]
+    ]);
+  });
+
   test('separates spectral peaks using the sensor timestamp despite jitter',
       () {
     final result = ImuFrequencyAnalyzer.analyze(signal(jitter: true));
@@ -58,11 +66,17 @@ void main() {
   });
 
   test('refuses a band beyond safe sampling bandwidth', () {
-    final result = ImuFrequencyAnalyzer.analyze(signal(stepMs: 40));
+    final result = ImuFrequencyAnalyzer.analyze(signal(stepMs: 50));
     expect(result.error, isNull);
-    expect(result.nyquistHz, closeTo(12.5, 0.1));
+    expect(result.nyquistHz, closeTo(10, 0.1));
     expect(result.bands[1].peakHz, isNull);
     expect(result.bands[1].unavailableReason, contains('too low'));
+  });
+
+  test('accepts the vibration band at 25 Hz sampling', () {
+    final result = ImuFrequencyAnalyzer.analyze(signal(stepMs: 40));
+    expect(result.nyquistHz, closeTo(12.5, 0.1));
+    expect(result.bands[1].peakHz, closeTo(8, 0.2));
   });
 
   test('rejects missing timing data rather than interpolating a large gap', () {

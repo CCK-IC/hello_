@@ -18,9 +18,8 @@ void main() {
         duration: Duration(seconds: 8),
         sampleCount: 201,
         bands: [
-          FrequencyBandResult(
-              FrequencyBand('Percussion', 0.5, 5), 2.25, null),
-          FrequencyBandResult(FrequencyBand('Vibration', 5, 12), null,
+          FrequencyBandResult(FrequencyBand('Percussion', 1, 5), 2.25, null),
+          FrequencyBandResult(FrequencyBand('Vibration', 6.5, 10), null,
               'Too slow, collect "more" data'),
         ],
       ),
@@ -31,9 +30,9 @@ void main() {
     expect(lines, hasLength(3));
     expect(lines.first, startsWith('estimate_time_utc,elapsed_ms,'));
     expect(lines[1],
-        '2026-11-02T00:00:01.250Z,1250.0,accelerometer,8000,201,25.0,12.5,,Percussion,0.5,5.0,2.25,');
+        '2026-11-02T00:00:01.250Z,1250.0,accelerometer,8000,201,25.0,12.5,,Percussion,1.0,5.0,2.25,');
     expect(lines[2],
-        '2026-11-02T00:00:01.250Z,1250.0,accelerometer,8000,201,25.0,12.5,,Vibration,5.0,12.0,,"Too slow, collect ""more"" data"');
+        '2026-11-02T00:00:01.250Z,1250.0,accelerometer,8000,201,25.0,12.5,,Vibration,6.5,10.0,,"Too slow, collect ""more"" data"');
   });
 
   test('records errors even if no band result is present', () {

@@ -207,9 +207,7 @@ class _BleImuAppState extends State<BleImuApp> {
         setState(() => _rawStreamStalled = stalled);
       }
     });
-    _controlPanelController = ControlPanelController(
-      requestedRate: _isMacChrome ? 10 : (_isWindows ? 25 : 100),
-    );
+    _controlPanelController = ControlPanelController();
     // Windows peers have stalled while enabling the status CCC. Keep the
     // connection usable and let the user opt in to status notifications.
     if (_isWindows) _enabledStreams["status"] = false;

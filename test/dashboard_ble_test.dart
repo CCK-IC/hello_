@@ -12,6 +12,7 @@ const _deviceId = 'aa:bb:cc:dd:ee:ff';
 class _FakeBlePlatform extends UniversalBlePlatform {
   bool connected = false;
   final subscriptions = <String>[];
+  final writes = <Uint8List>[];
 
   @override
   Future<void> startScan(
@@ -53,7 +54,9 @@ class _FakeBlePlatform extends UniversalBlePlatform {
       String service,
       String characteristic,
       Uint8List value,
-      BleOutputProperty bleOutputProperty) async {}
+      BleOutputProperty bleOutputProperty) async {
+    writes.add(Uint8List.fromList(value));
+  }
 
   @override
   Future<void> setNotifiable(String deviceId, String service,
@@ -93,6 +96,7 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('CONNECT'));
     await tester.pumpAndSettle();
+    expect(ble.writes.first, orderedEquals(SetRateCommand(45).serialize()));
     await tester.tap(find.byIcon(Icons.analytics_outlined));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
