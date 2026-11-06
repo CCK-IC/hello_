@@ -1,6 +1,5 @@
 import "dart:async";
 import "dart:convert";
-import "dart:typed_data";
 
 import "package:file_saver/file_saver.dart";
 import 'package:flutter/foundation.dart';
@@ -16,17 +15,47 @@ import "models/raw_stream_watchdog.dart";
 import "widgets/raw_imu_chart.dart";
 import "widgets/adc_chart.dart";
 import "widgets/imu_analysis_page.dart";
-// import 'widgets/imu_3d_view.dart';
-// import 'widgets/euler_chart.dart';
 import 'widgets/control_panel.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MaterialApp(
-    debugShowCheckedModeBanner: false,
-    themeMode: ThemeMode.light,
-    home: BleImuApp(),
-  ));
+  runApp(const BleImuMonitor());
+}
+
+class BleImuMonitor extends StatelessWidget {
+  const BleImuMonitor({super.key});
+
+  static const title = 'BLE IMU Monitor';
+
+  ThemeData _theme(Brightness brightness) {
+    final colors = ColorScheme.fromSeed(
+      seedColor: const Color(0xFF0D6F73),
+      brightness: brightness,
+    );
+    return ThemeData(
+      useMaterial3: true,
+      colorScheme: colors,
+      scaffoldBackgroundColor: colors.surface,
+      cardTheme: CardThemeData(
+        margin: EdgeInsets.zero,
+        elevation: 0,
+        color: colors.surfaceContainerLow,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: colors.outlineVariant),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        title: title,
+        debugShowCheckedModeBanner: false,
+        theme: _theme(Brightness.light),
+        darkTheme: _theme(Brightness.dark),
+        home: const BleImuApp(),
+      );
 }
 
 class BleOperationException implements Exception {
@@ -66,6 +95,7 @@ class _BleImuAppState extends State<BleImuApp> {
     _rawWatchdog.stop();
     _rawStreamStalled = false;
   }
+
   bool _uiRefreshPending = false;
 
   void _scheduleUiRefresh() {
@@ -77,8 +107,7 @@ class _BleImuAppState extends State<BleImuApp> {
       if (mounted) setState(() {});
     });
   }
-  // static const Duration _normalConnectionTimeout = Duration(seconds: 20);
-  // static const Duration _windowsConnectionTimeout = Duration(seconds: 45);
+
   static const Duration _windowsGattDelay = Duration(milliseconds: 350);
   static const Duration _normalGattDelay = Duration(milliseconds: 80);
 
@@ -118,7 +147,8 @@ class _BleImuAppState extends State<BleImuApp> {
   DateTime _lastHistoryPrune = DateTime.fromMillisecondsSinceEpoch(0);
 
   void _pruneRawHistory(DateTime now, {bool force = false}) {
-    if (!force && now.difference(_lastHistoryPrune) < const Duration(seconds: 1)) {
+    if (!force &&
+        now.difference(_lastHistoryPrune) < const Duration(seconds: 1)) {
       return;
     }
 
@@ -149,19 +179,33 @@ class _BleImuAppState extends State<BleImuApp> {
   }
 
   bool _sameDevice(String? first, String? second) {
-  if (first == null || second == null) return false;
-  return kIsWeb ? first == second : first.toLowerCase() == second.toLowerCase();
-}
+    if (first == null || second == null) return false;
+    return kIsWeb
+        ? first == second
+        : first.toLowerCase() == second.toLowerCase();
+  }
 
   BleDevice? _connectedDevice;
   bool _isScanning = false;
   final List<BleDevice> _scannedDevices = [];
+  static const _imuNamePrefix = "XIAO-IMU-RAW";
+  static const _imuServices = [
+    BleUuids.deviceStatusService,
+    BleUuids.imuService,
+    BleUuids.auxiliaryService,
+  ];
+
+  bool _isImuSensor(BleDevice device) {
+    final name = device.name?.toLowerCase() ?? "";
+    return name.startsWith(_imuNamePrefix.toLowerCase()) ||
+        _imuServices.any(device.services.contains) ||
+        _imuServices.any(device.serviceData.containsKey);
+  }
 
   bool _connecting = false;
   String? _connectionError;
 
   final Map<String, bool> _enabledStreams = {
-    "quaternion": true,
     "rawImu": true,
     "auxiliary": false,
     "status": true,
@@ -186,15 +230,9 @@ class _BleImuAppState extends State<BleImuApp> {
   Timer? _rawRecordingTimer;
   final List<RawImuHistoryPoint> _rawRecording = [];
 
-  // QuaternionSample? _latestSample;
   RawImuSample? _latestRawSample;
   DeviceStatus? _latestStatus;
   int _invalidRawPacketCount = 0;
-  // Chart buffers
-  // final List<double> _rollHistory = [];
-  // final List<double> _pitchHistory = [];
-  // final List<double> _yawHistory = [];
-  // static const int _maxDataPoints = 80;
 
   final List<String> _commandHistory = [];
 
@@ -226,27 +264,30 @@ class _BleImuAppState extends State<BleImuApp> {
     UniversalBle.queueType = QueueType.global;
     UniversalBle.onScanResult = (device) {
       if (!mounted || !_isScanning) return;
-      if (!_scannedDevices.any((d) => d.deviceId == device.deviceId)) {
+      final index = _scannedDevices.indexWhere(
+        (result) => _sameDevice(result.deviceId, device.deviceId),
+      );
+      if (index < 0) {
+        if (!kIsWeb && !_isImuSensor(device)) return;
         setState(() => _scannedDevices.add(device));
+      } else if (!kIsWeb &&
+          (_scannedDevices[index].name?.isEmpty ?? true) &&
+          (device.name?.isNotEmpty ?? false)) {
+        // A service may identify a sensor before its name arrives.
+        setState(() => _scannedDevices[index] = device);
       }
     };
 
-    //  Best Practice: Push data straight into a stream controller or separate isolate
-    // final _bleDataController = StreamController<({String deviceId, String characteristicId, Uint8List value})>();
-    // _bleDataController = StreamController<BleCharacteristicValue >();
     _bleDataController =
         StreamController<BleCharacteristicValue>.broadcast(sync: true);
-    
 
-    UniversalBle.onValueChange = (BleCharacteristicValue update) {//timestamp is optional and can be null
-      // _bleDataController.sink.add( characteristicId: update.characteristicId, deviceId: update.deviceId,value: update.value);
-      // _bleDataController.sink.add( update);
+    UniversalBle.onValueChange = (BleCharacteristicValue update) {
       if (!_bleDataController.isClosed) {
         _bleDataController.add(update);
       }
     };
 
-    void _handleCharacteristicValue(BleCharacteristicValue data) {
+    void handleCharacteristicValue(BleCharacteristicValue data) {
       if (!_sameDevice(data.deviceId, _connectedDevice?.deviceId) &&
           !_sameDevice(data.deviceId, _pendingDeviceId)) {
         return;
@@ -273,9 +314,8 @@ class _BleImuAppState extends State<BleImuApp> {
     }
 
     _bleDataSubscription =
-        _bleDataController.stream.listen(_handleCharacteristicValue);
+        _bleDataController.stream.listen(handleCharacteristicValue);
 
-    // UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
     UniversalBle.onConnectionChange = (BleConnectionChange change) {
       if (!_sameDevice(_pendingDeviceId, change.deviceId) &&
           !_sameDevice(_connectedDevice?.deviceId, change.deviceId)) {
@@ -318,51 +358,53 @@ class _BleImuAppState extends State<BleImuApp> {
     };
   }
 
-Future<void> _startScan() async {
-  _scanTimer?.cancel();
-  setState(() {
-    _scannedDevices.clear();
-    _isScanning = true;
-    _connectionError = null;
-  });
+  Future<void> _startScan() async {
+    if (_isScanning || _connecting) return;
+    _scanTimer?.cancel();
+    setState(() {
+      _scannedDevices.clear();
+      _isScanning = true;
+      _connectionError = null;
+    });
 
-  // On Web, all services you intend to access MUST be declared in the scan filter,
-  // otherwise Web Bluetooth throws a SecurityError.
-  // On Android, we can scan broadly or with filters.
-  final ScanFilter? scanFilter = kIsWeb
-      ? ScanFilter(
-          withServices: [
-            BleUuids.deviceStatusService,
-            BleUuids.imuService,
-            BleUuids.auxiliaryService,
-          ],
-          // The firmware puts its name in the primary advertisement and the
-          // service UUID in the scan response. macOS Chrome may see only one.
-          withNamePrefix: ["XIAO-IMU-RAW"],
-        )
-      : null;
+    // On Web, all services you intend to access MUST be declared in the scan filter,
+    // otherwise Web Bluetooth throws a SecurityError.
+    // Native scans stay broad because the name and service UUID may arrive
+    // separately. Filter the results before adding them to the page.
+    final ScanFilter? scanFilter = kIsWeb
+        ? ScanFilter(
+            withServices: _imuServices,
+            // The firmware puts its name in the primary advertisement and the
+            // service UUID in the scan response. macOS Chrome may see only one.
+            withNamePrefix: [_imuNamePrefix],
+          )
+        : null;
 
-  try {
-    await UniversalBle.startScan(scanFilter: scanFilter);
-  } catch (e) {
-    debugPrint("Scan failed: $e");
-    if (mounted) {
-      setState(() {
-        _isScanning = false;
-        _connectionError = "Scan failed: $e";
-      });
+    try {
+      await UniversalBle.startScan(scanFilter: scanFilter);
+    } catch (e) {
+      debugPrint("Scan failed: $e");
+      if (mounted) {
+        setState(() {
+          _isScanning = false;
+          _connectionError = "Scan failed: $e";
+        });
+      }
+      return;
     }
-    return;
+
+    if (!mounted || !_isScanning) return;
+    // Web Bluetooth's chooser returns one selected device; it is not an
+    // ongoing scan. Do not leave the UI in scanning state after it closes.
+    if (kIsWeb) {
+      setState(() => _isScanning = false);
+      return;
+    }
+    _scanTimer = Timer(const Duration(seconds: 6), _stopScan);
   }
 
-  if (!mounted || !_isScanning) return;
-  // Web Bluetooth's chooser returns one selected device; it is not an
-  // ongoing scan. Do not leave the UI in scanning state after it closes.
-  if (kIsWeb) {
-    setState(() => _isScanning = false);
-    return;
-  }
-  _scanTimer = Timer(const Duration(seconds: 6), () async {
+  Future<void> _stopScan() async {
+    _scanTimer?.cancel();
     try {
       await UniversalBle.stopScan();
     } catch (error) {
@@ -370,8 +412,7 @@ Future<void> _startScan() async {
     } finally {
       if (mounted) setState(() => _isScanning = false);
     }
-  });
-}
+  }
 
   Future<void> _connect(BleDevice device) async {
     if (_connecting || _disconnecting || _connectedDevice != null) return;
@@ -486,28 +527,16 @@ Future<void> _startScan() async {
     }
   }
 
-  bool get _isWindows =>
-      defaultTargetPlatform == TargetPlatform.windows;
+  bool get _isWindows => defaultTargetPlatform == TargetPlatform.windows;
 
   bool get _isMacChrome =>
       kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
-  Duration get _gattDelay =>
-      _isWindows
-          ? _windowsGattDelay
-          : _isMacChrome
-              ? const Duration(milliseconds: 800)
-              : _normalGattDelay;
-
-
-
-  // Future<void> _applyEnabledSubscriptions(String deviceId) async {
-    // await _setStreamSubscription(
-    //   deviceId: deviceId,
-    //   serviceUuid: BleUuids.imuService,
-    //   characteristicUuid: BleUuids.quaternionChar,
-    //   enabled: _enabledStreams["quaternion"]!,
-    // );
+  Duration get _gattDelay => _isWindows
+      ? _windowsGattDelay
+      : _isMacChrome
+          ? const Duration(milliseconds: 800)
+          : _normalGattDelay;
 
   Future<void> _applyEnabledSubscriptions(String deviceId) async {
     // Establish status while the device is not yet sending raw samples.
@@ -543,10 +572,11 @@ Future<void> _startScan() async {
   Future<void> _prepareAuxiliaryMtu(String deviceId) async {
     // Android can request an MTU; other platforms negotiate it themselves.
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-      final mtu = await UniversalBle.requestMtu(
-        deviceId, 128, timeout: const Duration(seconds: 15));
+      final mtu = await UniversalBle.requestMtu(deviceId, 128,
+          timeout: const Duration(seconds: 15));
       if (mtu < 25) {
-        throw StateError("ADC requires BLE MTU 25 or greater (negotiated $mtu)");
+        throw StateError(
+            "ADC requires BLE MTU 25 or greater (negotiated $mtu)");
       }
     }
   }
@@ -589,27 +619,6 @@ Future<void> _startScan() async {
     await Future<void>.delayed(_gattDelay);
   }
 
-  // Future<void> _setStreamSubscription({
-  //   required String deviceId,
-  //   required String serviceUuid,
-  //   required String characteristicUuid,
-  //   required bool enabled,
-  // }) async {
-  //   await _retryGattOperation(
-  //     "$serviceUuid/$characteristicUuid notification setup",
-  //     () => UniversalBle.setNotifiable(
-  //       deviceId,
-  //       serviceUuid,
-  //       characteristicUuid,
-  //       enabled
-  //           ? BleInputProperty.notification
-  //           : BleInputProperty.disabled,
-  //     ),
-  //   );
-
-  //   await Future<void>.delayed(_gattDelay);
-  // }
-
   Future<void> _toggleStream(String key, bool enabled) async {
     final token = _subscriptionGate.begin(key);
     if (token == null) return;
@@ -630,10 +639,6 @@ Future<void> _startScan() async {
     late final String characteristicUuid;
 
     switch (key) {
-      // case "quaternion":
-      //   serviceUuid = BleUuids.imuService;
-      //   characteristicUuid = BleUuids.quaternionChar;
-      //   break;
       case "rawImu":
         serviceUuid = BleUuids.imuService;
         characteristicUuid = BleUuids.rawImuChar;
@@ -656,15 +661,12 @@ Future<void> _startScan() async {
         await _prepareAuxiliaryMtu(device.deviceId);
       }
       await _setSubscription(
-        device.deviceId, serviceUuid, characteristicUuid, enabled);
+          device.deviceId, serviceUuid, characteristicUuid, enabled);
 
       if (!_subscriptionGate.finish(key, token) || !mounted) return;
 
       setState(() {
         if (enabled && key == "rawImu") _startRawWatchdog();
-        // if (!enabled && key == "quaternion") {
-        //   _latestSample = null;
-        // } else 
         if (!enabled && key == "rawImu") {
           _latestRawSample = null;
         } else if (!enabled && key == "status") {
@@ -691,7 +693,6 @@ Future<void> _startScan() async {
     }
   }
 
-
   Future<void> _disconnect() async {
     if (_disconnecting) return;
     final device = _connectedDevice;
@@ -713,7 +714,6 @@ Future<void> _startScan() async {
         _linkConnected = false;
         _analysisSamples.add(null);
         _subscriptionGate.reset();
-        // _latestSample = null;
         _latestRawSample = null;
         _latestStatus = null;
         _rawRecording.clear();
@@ -732,13 +732,14 @@ Future<void> _startScan() async {
       _disconnecting = false;
     }
   }
+
   @override
   void dispose() {
     _rawWatchdogTimer?.cancel();
     _diagnosticsTimer?.cancel();
     _rawRecordingTimer?.cancel();
     _scanTimer?.cancel();
-     _uiRefreshTimer?.cancel();
+    _uiRefreshTimer?.cancel();
     _bleDataSubscription?.cancel();
     _bleDataController.close();
     _analysisSamples.close();
@@ -775,7 +776,8 @@ Future<void> _startScan() async {
           deviceId,
           BleUuids.deviceStatusService,
           BleUuids.controlChar,
-          SetRateCommand(_controlPanelController.requestedRate.toInt()).serialize(),
+          SetRateCommand(_controlPanelController.requestedRate.toInt())
+              .serialize(),
           timeout: const Duration(seconds: 15),
         );
       } catch (error) {
@@ -785,703 +787,551 @@ Future<void> _startScan() async {
 
     if (!mounted) return;
     setState(() {
-      _commandHistory.add("[${DateTime.now().toIso8601String().substring(11, 19)}] ${cmd.name}");
+      _commandHistory.add(
+          "[${DateTime.now().toIso8601String().substring(11, 19)}] ${cmd.name}");
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    final device = _connectedDevice;
     return Scaffold(
-      backgroundColor: const Color.fromARGB(255, 135, 217, 224),
       appBar: AppBar(
-        title: const Text("IMU BLE 3D Attitude Monitor"),
-        backgroundColor: const Color.fromARGB(255, 134, 152, 201),
+        title: const Text(BleImuMonitor.title),
         actions: [
-          if (_connectedDevice != null)
-            Semantics(
-              label: "Analyze IMU data",
-              button: true,
-              child: IconButton(
-                icon: const Icon(Icons.analytics_outlined),
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => ImuAnalysisPage(samples: _analysisSamples.stream),
-                  ),
+          if (device == null)
+            IconButton(
+              tooltip: _isScanning
+                  ? (kIsWeb ? "Waiting for Bluetooth chooser" : "Stop scan")
+                  : "Search for Bluetooth devices",
+              icon: Icon(_isScanning && !kIsWeb ? Icons.stop : Icons.search),
+              // The browser owns the chooser and only the user can dismiss it.
+              onPressed: _connecting || (_isScanning && kIsWeb)
+                  ? null
+                  : _isScanning
+                      ? _stopScan
+                      : _startScan,
+            )
+          else ...[
+            IconButton(
+              tooltip: "Analyze IMU data",
+              icon: const Icon(Icons.analytics_outlined),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) =>
+                      ImuAnalysisPage(samples: _analysisSamples.stream),
                 ),
               ),
             ),
-          if (_connectedDevice == null)
             IconButton(
-              icon: Icon(_isScanning && !kIsWeb ? Icons.stop : Icons.search),
-              // Browsers own the chooser and only the user can dismiss it.
-              // A stopScan queued behind requestDevice cannot close it.
-              onPressed: _isScanning && kIsWeb
-                  ? null
-                  : _isScanning
-                      ? () => UniversalBle.stopScan()
-                      : _startScan,
-            )
-          else
-            IconButton(
-              icon: const Icon(Icons.link_off, color: Colors.redAccent),
+              tooltip: "Disconnect sensor",
+              icon: const Icon(Icons.link_off),
               onPressed: _disconnect,
             ),
-        // if (_connecting)
-        //   const Padding(
-        //     padding: EdgeInsets.only(top: 8),
-        //     child: LinearProgressIndicator(),
-        //   ),
-        // if (_connectionError != null)
-        //   Padding(
-        //     padding: const EdgeInsets.only(top: 8),
-        //     child: Text(
-        //       _connectionError!,
-        //       style: const TextStyle(color: Colors.redAccent),
-        //     ),
-        //   ),
+          ],
         ],
       ),
-      
-      body: _connecting
-        ? const Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 12),
-                Text("Connecting and discovering services..."),
-              ],
-            ),
-          )
-        : _connectedDevice == null
-            ? _buildScannerList()
-            : _buildDashboard(),
-        );
+      body: SafeArea(
+        top: false,
+        child: _connecting
+            ? const _PageContent(
+                key: ValueKey('connecting'),
+                maxWidth: 720,
+                children: [
+                  _SectionCard(children: [
+                    LinearProgressIndicator(
+                        semanticsLabel: "Connecting to sensor"),
+                    SizedBox(height: 12),
+                    Text("Connecting and discovering services..."),
+                  ]),
+                ],
+              )
+            : device == null
+                ? _buildScannerList()
+                : _buildDashboard(device),
+      ),
+    );
   }
 
   Widget _buildScannerList() {
-    return ListView(
-      padding: const EdgeInsets.all(12),
+    final colors = Theme.of(context).colorScheme;
+    return _PageContent(
+      key: const ValueKey('scanner'),
+      maxWidth: 720,
       children: [
-        if (_connectionError != null)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Text(_connectionError!,
-                style: const TextStyle(color: Colors.red)),
+        _SectionCard(children: [
+          Icon(Icons.bluetooth_searching, color: colors.primary, size: 32),
+          const SizedBox(height: 12),
+          const _SectionHeading("Find a sensor"),
+          const SizedBox(height: 4),
+          const Text(
+              "Connect to a Bluetooth sensor to view live motion data and record it to CSV."),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: _isScanning ? null : _startScan,
+            child: const Text("Find devices"),
           ),
-        if (_isScanning) const LinearProgressIndicator(),
-        const SizedBox(height: 12),
-        const Text("Available BLE Devices", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        const SizedBox(height: 8),
+        ]),
+        if (_connectionError case final error?) _StatusNotice(error),
+        if (_isScanning)
+          const LinearProgressIndicator(
+              semanticsLabel: "Searching for Bluetooth devices"),
+        const _SectionHeading(
+            kIsWeb ? "Available BLE Devices" : "Available IMU sensors"),
         if (_scannedDevices.isEmpty && !_isScanning)
-          const Padding(
-            padding: EdgeInsets.all(24.0),
-            child: Center(child: Text("No devices found. Tap Search to discover.")),
-          ),
-        ..._scannedDevices.map(
-          (d) => Card(
-            color: const Color.fromARGB(235, 120, 137, 185),
-            child: ListTile(
-              title: Text(d.name?.isNotEmpty == true ? d.name! : "Unnamed Sensor"),
-              subtitle: Text(d.deviceId, style: const TextStyle(fontFamily: 'monospace')),
-              trailing: ElevatedButton(
-                child: const Text("CONNECT"),
-                onPressed: () => _connect(d),
-              ),
+          const Text(kIsWeb
+              ? "No devices found. Make sure your sensor is powered on and nearby."
+              : "No IMU sensors found. Make sure your sensor is powered on and nearby."),
+        for (final device in _scannedDevices)
+          _SectionCard(children: [
+            _SectionHeading(_deviceName(device)),
+            const SizedBox(height: 4),
+            Text(device.deviceId,
+                style: const TextStyle(fontFamily: 'monospace')),
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: () => _connect(device),
+              child: const Text("CONNECT"),
             ),
+          ]),
+      ],
+    );
+  }
+
+  String _deviceName(BleDevice device) {
+    final name = device.name;
+    return name == null || name.isEmpty ? "Unnamed Sensor" : name;
+  }
+
+  Widget _buildDashboard(BleDevice device) {
+    return _PageContent(
+      key: const ValueKey('dashboard'),
+      children: [
+        _SectionCard(children: [
+          const Text("Connected sensor"),
+          _SectionHeading(_deviceName(device)),
+        ]),
+        if (_rawStreamStalled)
+          _StatusNotice(
+            _subscriptionGate.isUncertain("rawImu")
+                ? "Raw notifications have stopped. The subscription state is uncertain after a timeout; disconnect and reconnect to retry."
+                : "Raw notifications have stopped. The device may be disconnected; disconnect and reconnect to retry.",
           ),
+        if (_connectionError case final error?) _StatusNotice(error),
+        _buildTelemetry(),
+        _buildRawReadings(),
+        _buildSubscriptions(),
+        _buildRawVisualization(),
+        _buildAdcHistory(),
+        ControlPanel(
+          onSendCommand: _sendCommand,
+          commandHistory: _commandHistory,
+          controller: _controlPanelController,
         ),
       ],
     );
   }
 
-  Widget _buildDashboard() {
-    // final quat = _latestSample;
-    final raw = _latestRawSample;
+  Widget _buildTelemetry() {
     final status = _latestStatus;
+    return _SectionCard(children: [
+      const _SectionHeading("Device telemetry"),
+      const SizedBox(height: 8),
+      if (status == null)
+        Text(_enabledStreams["status"]!
+            ? "Waiting for device status notifications."
+            : "Enable Device status under BLE subscriptions to see telemetry.")
+      else
+        Wrap(
+          spacing: 24,
+          runSpacing: 8,
+          children: [
+            Text("Board: ${status.boardName}"),
+            Text("Firmware: ${status.firmwareVersion}"),
+            Text("IMU state: ${status.imuStateString}"),
+            Text(
+                "Battery: ${status.batteryMilliVolts} mV (${status.batteryPercent}%)"),
+            Text("Sensor sample rate: ${status.actualSensorRate} Hz"),
+            Text("BLE notification rate: ${status.notificationRate} Hz"),
+            Text("Uptime: ${(status.uptimeMs / 1000).toStringAsFixed(1)} s"),
+            Text("Dropped notifications: ${status.droppedNotifications}"),
+            Text("FIFO / I2C recoveries: ${status.fifoRecoveries}"),
+          ],
+        ),
+    ]);
+  }
 
-    return LayoutBuilder(builder: (context, constraints) {
-      final isWide = constraints.maxWidth > 800;
-
-      // final visualizationColumn = Column(
-      //   children: [
-      //     // Warnings Banner (Synthetic / Degraded indicator)
-      //     if (quat?.flags.isSynthetic == true || quat?.flags.isDegraded == true)
-      //       Container(
-      //         padding: const EdgeInsets.all(8),
-      //         margin: const EdgeInsets.symmetric(vertical: 4),
-      //         color: Colors.amber.shade900,
-      //         child: Row(
-      //           children: [
-      //             const Icon(Icons.warning, color: Colors.white),
-      //             const SizedBox(width: 8),
-      //             Text(
-      //               quat!.flags.isSynthetic ? "WARNING: Synthetic fallback data" : "WARNING: Degraded Mode",
-      //               style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-      //             ),
-      //           ],
-      //         ),
-      //       ),
-
-      //     // 3D Canvas
-      //     Expanded(
-      //       flex: 5,
-      //       child: Card(
-      //         color: const Color.fromARGB(235, 159, 160, 163),
-      //         child: Stack(
-      //           children: [
-      //             Imu3dView(
-      //               q0: quat?.w ?? 1.0,
-      //               q1: quat?.x ?? 0.0,
-      //               q2: quat?.y ?? 0.0,
-      //               q3: quat?.z ?? 0.0,
-      //             ),
-      //             Positioned(
-      //               top: 10,
-      //               left: 10,
-      //               child: Text(
-      //                 "Roll: ${quat?.roll.toStringAsFixed(1)}°\n"
-      //                 "Pitch: ${quat?.pitch.toStringAsFixed(1)}°\n"
-      //                 "Yaw: ${quat?.yaw.toStringAsFixed(1)}°",
-      //                 style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold),
-      //               ),
-      //             ),
-      //           ],
-      //         ),
-      //       ),
-      //     ),
-
-      //     // Realtime Euler Angle Plot
-      //     Expanded(
-      //       flex: 4,
-      //       child: EulerChart(
-      //         rollHistory: _rollHistory,
-      //         pitchHistory: _pitchHistory,
-      //         yawHistory: _yawHistory,
-      //       ),
-      //     ),
-      //   ],
-      // );
-
-      final statusAndControlsColumn = ListView(
-        children: [
-          if (_rawStreamStalled)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Text(
-                _subscriptionGate.isUncertain("rawImu")
-                    ? "Raw notifications have stopped. The subscription state is uncertain after a timeout; disconnect and reconnect to retry."
-                    : "Raw notifications have stopped. The device may be disconnected; disconnect and reconnect to retry.",
-                style: const TextStyle(color: Colors.red),
+  Widget _buildRawReadings() {
+    final raw = _latestRawSample;
+    final colors = Theme.of(context).colorScheme;
+    return _SectionCard(children: [
+      const _SectionHeading("Raw ICM-20948 Data"),
+      const SizedBox(height: 8),
+      if (raw == null)
+        const Text("Waiting for raw IMU notifications...")
+      else ...[
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            Chip(label: Text("Raw v${raw.version}")),
+            Chip(label: Text("Sequence ${raw.sequence}")),
+            Chip(label: Text("${raw.timestampMs} ms")),
+            if (raw.measuredRateHz != null)
+              Chip(label: Text("${raw.measuredRateHz} Hz")),
+            if (raw.flags.dmpActive)
+              const Chip(
+                avatar: Icon(Icons.sync, size: 16),
+                label: Text("DMP concurrently active"),
               ),
-            ),
-          if (_connectionError != null)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Text(_connectionError!,
-                  style: const TextStyle(color: Colors.red)),
-            ),
-          // Telemetry and Status Details
-          Card(
-            color: const Color.fromARGB(80, 30, 34, 45),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text("Board: ${status?.boardName ?? 'Seeed XIAO'} | FW: ${status?.firmwareVersion ?? 'v1.x'}",
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
-                  const Divider(),
-                  Text("IMU State: ${status?.imuStateString ?? 'Running'}"),
-                  Text("Battery: ${status?.batteryMilliVolts ?? 0} mV (${status?.batteryPercent ?? 0}%)"),
-                  Text("Sensor Sample Rate: ${status?.actualSensorRate ?? 0} Hz"),
-                  Text("BLE Notification Rate: ${status?.notificationRate ?? 0} Hz"),
-                  Text("Uptime: ${((status?.uptimeMs ?? 0) / 1000).toStringAsFixed(1)} s"),
-                  Text("Dropped Notifications: ${status?.droppedNotifications ?? 0}"),
-                  Text("FIFO / I2C Recoveries: ${status?.fifoRecoveries ?? 0}"),
-                ],
-              ),
+          ],
+        ),
+        if (!raw.flags.sampleValid)
+          const _StatusNotice("Raw sample is marked invalid", announce: false),
+        if (raw.flags.magnetometerOverflow)
+          const _StatusNotice("Magnetometer overflow", announce: false),
+        const SizedBox(height: 8),
+        Text(
+          "Accelerometer ${raw.accelerometerRange}",
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        Text(
+          raw.flags.accelerometerValid
+              ? "X ${raw.accelerometerXG.toStringAsFixed(4)} g   "
+                  "Y ${raw.accelerometerYG.toStringAsFixed(4)} g   "
+                  "Z ${raw.accelerometerZG.toStringAsFixed(4)} g"
+              : "Accelerometer data marked invalid",
+          style: TextStyle(
+            fontFamily: "monospace",
+            color:
+                raw.flags.accelerometerValid ? colors.onSurface : colors.error,
+          ),
+        ),
+        Text(
+          "Counts: ${raw.accelerometerX}, "
+          "${raw.accelerometerY}, ${raw.accelerometerZ}",
+          style: const TextStyle(
+            fontFamily: "monospace",
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          "Gyroscope ${raw.gyroscopeRange}",
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        Text(
+          raw.flags.gyroscopeValid
+              ? "X ${raw.gyroscopeXDps.toStringAsFixed(3)} °/s   "
+                  "Y ${raw.gyroscopeYDps.toStringAsFixed(3)} °/s   "
+                  "Z ${raw.gyroscopeZDps.toStringAsFixed(3)} °/s"
+              : "Gyroscope data marked invalid",
+          style: TextStyle(
+            fontFamily: "monospace",
+            color: raw.flags.gyroscopeValid ? colors.onSurface : colors.error,
+          ),
+        ),
+        Text(
+          "Counts: ${raw.gyroscopeX}, "
+          "${raw.gyroscopeY}, ${raw.gyroscopeZ}",
+          style: const TextStyle(
+            fontFamily: "monospace",
+            fontSize: 11,
+          ),
+        ),
+        if (raw.version == 1) ...[
+          const SizedBox(height: 10),
+          const Text(
+            "Magnetometer",
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Text(
+            raw.flags.magnetometerValid
+                ? "X ${raw.magnetometerX}   "
+                    "Y ${raw.magnetometerY}   "
+                    "Z ${raw.magnetometerZ} counts"
+                : "Magnetometer data marked invalid",
+            style: TextStyle(
+              fontFamily: "monospace",
+              color:
+                  raw.flags.magnetometerValid ? colors.onSurface : colors.error,
             ),
           ),
-          Card(
-            color: const Color.fromARGB(255, 125, 142, 189),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    children: [
-                      Icon(Icons.sensors, size: 18),
-                      SizedBox(width: 8),
-                      Text(
-                        "Raw ICM-20948 Data",
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    "Native raw sensor stream; not DMP quaternion data.",
-                    style: TextStyle(
-                      color: Colors.white60,
-                      fontSize: 11,
-                    ),
-                  ),
-                  const Divider(),
-                  if (raw == null)
-                    const Text("Waiting for raw IMU notifications...")
-                  else ...[
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        Chip(label: Text("Raw v${raw.version}")),
-                        Chip(label: Text("Sequence ${raw.sequence}")),
-                        Chip(label: Text("${raw.timestampMs} ms")),
-                        if (raw.measuredRateHz != null)
-                          Chip(label: Text("${raw.measuredRateHz} Hz")),
-                        if (raw.flags.dmpActive)
-                          const Chip(
-                            avatar: Icon(Icons.sync, size: 16),
-                            label: Text("DMP concurrently active"),
-                          ),
-                      ],
-                    ),
-                    if (!raw.flags.sampleValid)
-                      const _RawWarning(
-                        text: "Raw sample is marked invalid",
-                      ),
-                    if (raw.flags.magnetometerOverflow)
-                      const _RawWarning(
-                        text: "Magnetometer overflow",
-                      ),
-                    const SizedBox(height: 8),
-                    Text(
-                      "Accelerometer ${raw.accelerometerRange}",
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    Text(
-                      raw.flags.accelerometerValid
-                          ? "X ${raw.accelerometerXG.toStringAsFixed(4)} g   "
-                              "Y ${raw.accelerometerYG.toStringAsFixed(4)} g   "
-                              "Z ${raw.accelerometerZG.toStringAsFixed(4)} g"
-                          : "Accelerometer data marked invalid",
-                      style: TextStyle(
-                        fontFamily: "monospace",
-                        color: raw.flags.accelerometerValid
-                            ? Colors.white
-                            : Colors.amber,
-                      ),
-                    ),
-                    Text(
-                      "Counts: ${raw.accelerometerX}, "
-                      "${raw.accelerometerY}, ${raw.accelerometerZ}",
-                      style: const TextStyle(
-                        color: Colors.white60,
-                        fontFamily: "monospace",
-                        fontSize: 11,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      "Gyroscope ${raw.gyroscopeRange}",
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    Text(
-                      raw.flags.gyroscopeValid
-                          ? "X ${raw.gyroscopeXDps.toStringAsFixed(3)} °/s   "
-                              "Y ${raw.gyroscopeYDps.toStringAsFixed(3)} °/s   "
-                              "Z ${raw.gyroscopeZDps.toStringAsFixed(3)} °/s"
-                          : "Gyroscope data marked invalid",
-                      style: TextStyle(
-                        fontFamily: "monospace",
-                        color: raw.flags.gyroscopeValid
-                            ? Colors.white
-                            : Colors.amber,
-                      ),
-                    ),
-                    Text(
-                      "Counts: ${raw.gyroscopeX}, "
-                      "${raw.gyroscopeY}, ${raw.gyroscopeZ}",
-                      style: const TextStyle(
-                        color: Colors.white60,
-                        fontFamily: "monospace",
-                        fontSize: 11,
-                      ),
-                    ),
-                    if (raw.version == 1) ...[
-                      const SizedBox(height: 10),
-                      const Text(
-                        "Magnetometer",
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      Text(
-                        raw.flags.magnetometerValid
-                            ? "X ${raw.magnetometerX}   "
-                                "Y ${raw.magnetometerY}   "
-                                "Z ${raw.magnetometerZ} counts"
-                            : "Magnetometer data marked invalid",
-                        style: TextStyle(
-                          fontFamily: "monospace",
-                          color: raw.flags.magnetometerValid
-                              ? Colors.white
-                              : Colors.amber,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        raw.flags.temperatureValid
-                            ? "Internal temperature: ${raw.temperature} counts"
-                            : "Internal temperature data marked invalid",
-                        style: TextStyle(
-                          fontFamily: "monospace",
-                          color: raw.flags.temperatureValid
-                              ? Colors.white
-                              : Colors.amber,
-                        ),
-                      ),
-                    ],
-                  ],
-                  if (_invalidRawPacketCount > 0) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      "Rejected raw packets: $_invalidRawPacketCount",
-                      style: const TextStyle(
-                        color: Colors.redAccent,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
+          const SizedBox(height: 6),
+          Text(
+            raw.flags.temperatureValid
+                ? "Internal temperature: ${raw.temperature} counts"
+                : "Internal temperature data marked invalid",
+            style: TextStyle(
+              fontFamily: "monospace",
+              color:
+                  raw.flags.temperatureValid ? colors.onSurface : colors.error,
             ),
-          ),
-          Card(
-            color: const Color.fromARGB(148, 93, 104, 134),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    "BLE subscriptions",
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    "Disable unused streams to reduce BLE traffic and power use.",
-                    style: TextStyle(color: Colors.white60, fontSize: 11),
-                  ),
-                  const Divider(),
-                  // SwitchListTile(
-                  //   contentPadding: EdgeInsets.zero,
-                  //   title: const Text("IMU quaternion"),
-                  //   subtitle: const Text(BleUuids.quaternionChar),
-                  //   value: _enabledStreams["quaternion"]!,
-                  //   onChanged: (value) => _toggleStream("quaternion", value),
-                  // ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text("IMU raw"),
-                    subtitle: const Text(BleUuids.rawImuChar),
-                    value: _enabledStreams["rawImu"]!,
-                    onChanged: _subscriptionGate.canStart("rawImu")
-                        ? (value) => _toggleStream("rawImu", value)
-                        : null,
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text("Auxiliary sensor"),
-                    subtitle: const Text(BleUuids.auxiliaryChar),
-                    value: _enabledStreams["auxiliary"]!,
-                    onChanged: _subscriptionGate.canStart("auxiliary")
-                        ? (value) => _toggleStream("auxiliary", value)
-                        : null,
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text("Device status"),
-                    subtitle: const Text(BleUuids.statusChar),
-                    value: _enabledStreams["status"]!,
-                    onChanged: _subscriptionGate.canStart("status")
-                        ? (value) => _toggleStream("status", value)
-                        : null,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Card(
-            color: const Color.fromARGB(255, 121, 138, 182),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    "Raw data visualization",
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      const Text("IMU history buffer"),
-                      DropdownButton<int>(
-                        value: _rawHistoryRetention.inMinutes,
-                        items: const [
-                          DropdownMenuItem(value: 1, child: Text("1 minute")),
-                          DropdownMenuItem(value: 5, child: Text("5 minutes")),
-                          DropdownMenuItem(value: 10, child: Text("10 minutes")),
-                          DropdownMenuItem(value: 30, child: Text("30 minutes")),
-                          DropdownMenuItem(value: 60, child: Text("60 minutes")),
-                        ],
-                        onChanged: (minutes) {
-                          if (minutes == null) return;
-                          setState(() {
-                            _rawHistoryRetention = Duration(minutes: minutes);
-                            _pruneRawHistory(DateTime.now(), force: true);
-                          });
-                        },
-                      ),
-                    ],
-                  ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      for (final sensor in RawSensorType.values)
-                        FilterChip(
-                          label: Text(switch (sensor) {
-                            RawSensorType.accelerometer => "Accelerometer (g)",
-                            RawSensorType.gyroscope => "Gyroscope (°/s)",
-                            RawSensorType.magnetometer => "Magnetometer (counts)",
-                          }),
-                          selected: _selectedRawSensors.contains(sensor),
-                          onSelected: (selected) {
-                            if (!selected && _selectedRawSensors.length == 1) return;
-                            setState(() {
-                              if (selected) {
-                                _selectedRawSensors.add(sensor);
-                              } else {
-                                _selectedRawSensors.remove(sensor);
-                              }
-                            });
-                          },
-                        ),
-                      DropdownButton<int>(
-                        value: const [5, 10, 30]
-                                .contains(_rawChartPeriod.inSeconds)
-                            ? _rawChartPeriod.inSeconds
-                            : -1,
-                        items: const [
-                          DropdownMenuItem(value: 5, child: Text("Last 5 s")),
-                          DropdownMenuItem(value: 10, child: Text("Last 10 s")),
-                          DropdownMenuItem(value: 30, child: Text("Last 30 s")),
-                          DropdownMenuItem(value: -1, child: Text("Custom")),
-                        ],
-                        onChanged: (value) {
-                          if (value == null) return;
-
-                          if (value == -1) {
-                            _selectCustomPeriod(
-                              current: _rawChartPeriod,
-                              onSelected: (period) {
-                                setState(() => _rawChartPeriod = period);
-                              },
-                            );
-                          } else {
-                            setState(
-                              () => _rawChartPeriod = Duration(seconds: value),
-                            );
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  const Wrap(
-                    spacing: 12,
-                    children: [
-                      _AxisLegend(color: Colors.redAccent, label: "X"),
-                      _AxisLegend(color: Colors.greenAccent, label: "Y"),
-                      _AxisLegend(color: Colors.lightBlueAccent, label: "Z"),
-                    ],
-                  ),
-                  for (final sensor in RawSensorType.values)
-                    if (_selectedRawSensors.contains(sensor)) ...[
-                      Text(switch (sensor) {
-                        RawSensorType.accelerometer => "Accelerometer (g)",
-                        RawSensorType.gyroscope => "Gyroscope (°/s)",
-                        RawSensorType.magnetometer => "Magnetometer (counts)",
-                      }),
-                      RawImuChart(
-                        history: _rawHistory,
-                        sensor: sensor,
-                        visiblePeriod: _rawChartPeriod,
-                      ),
-                    ],
-                  OutlinedButton.icon(
-                    onPressed: _rawHistory.isEmpty ? null : _saveRawBufferCsv,
-                    icon: const Icon(Icons.download),
-                    label: Text("Save buffer CSV (${_rawHistory.length} samples)"),
-                  ),
-                  const Divider(),
-                  const Text(
-                    "CSV recording",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      DropdownButton<int>(
-                        value: const [5, 10, 30]
-                                .contains(_rawRecordingPeriod.inSeconds)
-                            ? _rawRecordingPeriod.inSeconds
-                            : -1,
-                        items: const [
-                          DropdownMenuItem(value: 5, child: Text("5 seconds")),
-                          DropdownMenuItem(value: 10, child: Text("10 seconds")),
-                          DropdownMenuItem(value: 30, child: Text("30 seconds")),
-                          DropdownMenuItem(value: -1, child: Text("Custom")),
-                        ],
-                        onChanged: _recordingRawCsv
-                            ? null
-                            : (value) {
-                                if (value == null) return;
-
-                                if (value == -1) {
-                                  _selectCustomPeriod(
-                                    current: _rawRecordingPeriod,
-                                    onSelected: (period) {
-                                      setState(
-                                        () => _rawRecordingPeriod = period,
-                                      );
-                                    },
-                                  );
-                                } else {
-                                  setState(
-                                    () => _rawRecordingPeriod =
-                                        Duration(seconds: value),
-                                  );
-                                }
-                              },
-                      ),
-                      FilledButton.icon(
-                        onPressed: _recordingRawCsv ||
-                                _connectedDevice == null ||
-                                !_enabledStreams["rawImu"]!
-                            ? null
-                            : _startRawCsvRecording,
-                        icon: const Icon(Icons.fiber_manual_record),
-                        label: const Text("Record CSV"),
-                      ),
-                      if (_recordingRawCsv)
-                        OutlinedButton.icon(
-                          onPressed: _cancelRawCsvRecording,
-                          icon: const Icon(Icons.stop),
-                          label: const Text("Cancel"),
-                        ),
-                    ],
-                  ),
-                  if (_recordingRawCsv) ...[
-                    const SizedBox(height: 8),
-                    LinearProgressIndicator(
-                      value: _rawRecordingStartedAt == null
-                          ? null
-                          : (DateTime.now()
-                                      .difference(_rawRecordingStartedAt!)
-                                      .inMilliseconds /
-                                  _rawRecordingPeriod.inMilliseconds)
-                              .clamp(0.0, 1.0),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      "Recording ${_rawRecording.length} samples...",
-                      style: const TextStyle(color: Colors.redAccent),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          Card(
-            color: const Color.fromARGB(255, 121, 138, 182),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (!_enabledStreams["auxiliary"]!)
-                    const Text("Enable Auxiliary sensor above to receive ADC data."),
-                  if (_enabledStreams["auxiliary"]! && _adcHistory.isEmpty)
-                    const Text("ADC notifications require a negotiated BLE MTU of at least 25."),
-                  Wrap(
-                    spacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      const Text("ADC history buffer"),
-                      DropdownButton<int>(
-                        value: _adcHistory.maxSamples,
-                        items: const [
-                          DropdownMenuItem(value: 1000, child: Text("1,000 samples")),
-                          DropdownMenuItem(value: 6000, child: Text("6,000 samples")),
-                          DropdownMenuItem(value: 30000, child: Text("30,000 samples")),
-                          DropdownMenuItem(value: 120000, child: Text("120,000 samples")),
-                        ],
-                        onChanged: (value) {
-                          if (value != null) setState(() => _adcHistory.maxSamples = value);
-                        },
-                      ),
-                    ],
-                  ),
-                  AdcChart(
-                    history: _adcHistory.pointsSince(DateTime.now().subtract(_rawChartPeriod)),
-                    visiblePeriod: _rawChartPeriod,
-                  ),
-                  if (_invalidAdcPacketCount > 0)
-                    Text("Rejected ADC packets: $_invalidAdcPacketCount"),
-                ],
-              ),
-            ),
-          ),
-          ControlPanel(
-            onSendCommand: _sendCommand,
-            commandHistory: _commandHistory,
-            controller: _controlPanelController,
           ),
         ],
-      );
+      ],
+      if (_invalidRawPacketCount > 0) ...[
+        const SizedBox(height: 8),
+        Text(
+          "Rejected raw packets: $_invalidRawPacketCount",
+          style: TextStyle(color: colors.error),
+        ),
+      ],
+    ]);
+  }
 
-      return isWide
-          ? Row(
-              children: [
-                // Expanded(flex: 3, child: visualizationColumn),
-                Expanded(flex: 2, child: statusAndControlsColumn),
-              ],
-            )
-          : Column(
-              children: [
-                // Expanded(flex: 6, child: visualizationColumn),
-                Expanded(flex: 4, child: statusAndControlsColumn),
-              ],
-            );
-    });
+  Widget _buildSubscriptions() {
+    return _SectionCard(children: [
+      const _SectionHeading("BLE subscriptions"),
+      const SizedBox(height: 4),
+      const Text(
+          "Disable unused streams to reduce Bluetooth traffic and power use."),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text("IMU raw"),
+        subtitle: const Text(BleUuids.rawImuChar),
+        value: _enabledStreams["rawImu"]!,
+        onChanged: _subscriptionGate.canStart("rawImu")
+            ? (value) => _toggleStream("rawImu", value)
+            : null,
+      ),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text("Auxiliary sensor"),
+        subtitle: const Text(BleUuids.auxiliaryChar),
+        value: _enabledStreams["auxiliary"]!,
+        onChanged: _subscriptionGate.canStart("auxiliary")
+            ? (value) => _toggleStream("auxiliary", value)
+            : null,
+      ),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text("Device status"),
+        subtitle: const Text(BleUuids.statusChar),
+        value: _enabledStreams["status"]!,
+        onChanged: _subscriptionGate.canStart("status")
+            ? (value) => _toggleStream("status", value)
+            : null,
+      ),
+    ]);
+  }
+
+  Widget _buildRawVisualization() {
+    final axisColors = RawImuChart.axisColors(Theme.of(context).brightness);
+    return _SectionCard(children: [
+      const _SectionHeading("Raw data visualization"),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _LabeledDropdown(
+            label: "IMU history buffer",
+            value: _rawHistoryRetention.inMinutes,
+            items: const [
+              DropdownMenuItem(value: 1, child: Text("1 minute")),
+              DropdownMenuItem(value: 5, child: Text("5 minutes")),
+              DropdownMenuItem(value: 10, child: Text("10 minutes")),
+              DropdownMenuItem(value: 30, child: Text("30 minutes")),
+              DropdownMenuItem(value: 60, child: Text("60 minutes")),
+            ],
+            onChanged: (minutes) {
+              if (minutes == null) return;
+              setState(() {
+                _rawHistoryRetention = Duration(minutes: minutes);
+                _pruneRawHistory(DateTime.now(), force: true);
+              });
+            },
+          ),
+        ],
+      ),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (final sensor in RawSensorType.values)
+            FilterChip(
+              label: Text(sensor.chartLabel),
+              selected: _selectedRawSensors.contains(sensor),
+              onSelected: (selected) {
+                if (!selected && _selectedRawSensors.length == 1) return;
+                setState(() {
+                  if (selected) {
+                    _selectedRawSensors.add(sensor);
+                  } else {
+                    _selectedRawSensors.remove(sensor);
+                  }
+                });
+              },
+            ),
+          _LabeledDropdown(
+            label: "Chart time window",
+            value: const [5, 10, 30].contains(_rawChartPeriod.inSeconds)
+                ? _rawChartPeriod.inSeconds
+                : -1,
+            items: const [
+              DropdownMenuItem(value: 5, child: Text("Last 5 s")),
+              DropdownMenuItem(value: 10, child: Text("Last 10 s")),
+              DropdownMenuItem(value: 30, child: Text("Last 30 s")),
+              DropdownMenuItem(value: -1, child: Text("Custom")),
+            ],
+            onChanged: (value) {
+              if (value == null) return;
+
+              if (value == -1) {
+                _selectCustomPeriod(
+                  current: _rawChartPeriod,
+                  onSelected: (period) {
+                    setState(() => _rawChartPeriod = period);
+                  },
+                );
+              } else {
+                setState(
+                  () => _rawChartPeriod = Duration(seconds: value),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 12,
+        children: [
+          _AxisLegend(color: axisColors[0], label: "X"),
+          _AxisLegend(color: axisColors[1], label: "Y"),
+          _AxisLegend(color: axisColors[2], label: "Z"),
+        ],
+      ),
+      for (final sensor in RawSensorType.values)
+        if (_selectedRawSensors.contains(sensor)) ...[
+          Text(sensor.chartLabel),
+          RawImuChart(
+            history: _rawHistory,
+            sensor: sensor,
+            visiblePeriod: _rawChartPeriod,
+          ),
+        ],
+      OutlinedButton.icon(
+        onPressed: _rawHistory.isEmpty ? null : _saveRawBufferCsv,
+        icon: const Icon(Icons.download),
+        label: Text("Save buffer CSV (${_rawHistory.length} samples)"),
+      ),
+      const Divider(),
+      const Text(
+        "CSV recording",
+        style: TextStyle(fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 6),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _LabeledDropdown(
+            label: "Recording duration",
+            value: const [5, 10, 30].contains(_rawRecordingPeriod.inSeconds)
+                ? _rawRecordingPeriod.inSeconds
+                : -1,
+            items: const [
+              DropdownMenuItem(value: 5, child: Text("5 seconds")),
+              DropdownMenuItem(value: 10, child: Text("10 seconds")),
+              DropdownMenuItem(value: 30, child: Text("30 seconds")),
+              DropdownMenuItem(value: -1, child: Text("Custom")),
+            ],
+            onChanged: _recordingRawCsv
+                ? null
+                : (value) {
+                    if (value == null) return;
+
+                    if (value == -1) {
+                      _selectCustomPeriod(
+                        current: _rawRecordingPeriod,
+                        onSelected: (period) {
+                          setState(
+                            () => _rawRecordingPeriod = period,
+                          );
+                        },
+                      );
+                    } else {
+                      setState(
+                        () => _rawRecordingPeriod = Duration(seconds: value),
+                      );
+                    }
+                  },
+          ),
+          FilledButton.icon(
+            onPressed: _recordingRawCsv ||
+                    _connectedDevice == null ||
+                    !_enabledStreams["rawImu"]!
+                ? null
+                : _startRawCsvRecording,
+            icon: const Icon(Icons.fiber_manual_record),
+            label: const Text("Record CSV"),
+          ),
+          if (_recordingRawCsv)
+            OutlinedButton.icon(
+              onPressed: _cancelRawCsvRecording,
+              icon: const Icon(Icons.stop),
+              label: const Text("Cancel"),
+            ),
+        ],
+      ),
+      if (_recordingRawCsv) ...[
+        const SizedBox(height: 8),
+        LinearProgressIndicator(
+          semanticsLabel: "CSV recording progress",
+          value: _rawRecordingStartedAt == null
+              ? null
+              : (DateTime.now()
+                          .difference(_rawRecordingStartedAt!)
+                          .inMilliseconds /
+                      _rawRecordingPeriod.inMilliseconds)
+                  .clamp(0.0, 1.0),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          "Recording ${_rawRecording.length} samples...",
+        ),
+      ],
+    ]);
+  }
+
+  Widget _buildAdcHistory() {
+    return _SectionCard(children: [
+      if (!_enabledStreams["auxiliary"]!)
+        const Text("Enable Auxiliary sensor above to receive ADC data."),
+      if (_enabledStreams["auxiliary"]! && _adcHistory.isEmpty)
+        const Text(
+            "ADC notifications require a negotiated BLE MTU of at least 25."),
+      Wrap(
+        spacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _LabeledDropdown(
+            label: "ADC history buffer",
+            value: _adcHistory.maxSamples,
+            items: const [
+              DropdownMenuItem(value: 1000, child: Text("1,000 samples")),
+              DropdownMenuItem(value: 6000, child: Text("6,000 samples")),
+              DropdownMenuItem(value: 30000, child: Text("30,000 samples")),
+              DropdownMenuItem(value: 120000, child: Text("120,000 samples")),
+            ],
+            onChanged: (value) {
+              if (value != null) setState(() => _adcHistory.maxSamples = value);
+            },
+          ),
+        ],
+      ),
+      AdcChart(
+        history:
+            _adcHistory.pointsSince(DateTime.now().subtract(_rawChartPeriod)),
+        visiblePeriod: _rawChartPeriod,
+      ),
+      if (_invalidAdcPacketCount > 0)
+        Text("Rejected ADC packets: $_invalidAdcPacketCount"),
+    ]);
   }
 
   void _startRawCsvRecording() {
@@ -1526,7 +1376,8 @@ Future<void> _startScan() async {
     if (samples.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("No IMU samples in the selected buffer period.")),
+          const SnackBar(
+              content: Text("No IMU samples in the selected buffer period.")),
         );
       }
       return;
@@ -1539,7 +1390,6 @@ Future<void> _startScan() async {
     DateTime startedAt,
     String prefix,
   ) async {
-
     final csv = StringBuffer()
       ..writeln(
         "received_iso8601,elapsed_ms,packet_version,sequence,"
@@ -1632,22 +1482,38 @@ Future<void> _startScan() async {
     required Duration current,
     required ValueChanged<Duration> onSelected,
   }) async {
-    final controller = TextEditingController(
-      text: current.inSeconds.toString(),
-    );
-
+    final form = GlobalKey<FormState>();
+    var input = current.inSeconds.toString();
     final seconds = await showDialog<int>(
       context: context,
       builder: (context) {
+        void submit() {
+          if (form.currentState!.validate()) {
+            Navigator.pop(context, int.parse(input.trim()));
+          }
+        }
+
         return AlertDialog(
           title: const Text("Custom period"),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(
-              labelText: "Seconds",
-              helperText: "1–600 seconds",
+          content: Form(
+            key: form,
+            child: TextFormField(
+              initialValue: input,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              textInputAction: TextInputAction.done,
+              onChanged: (value) => input = value,
+              onFieldSubmitted: (_) => submit(),
+              validator: (value) {
+                final seconds = int.tryParse(value?.trim() ?? "");
+                return seconds == null || seconds < 1 || seconds > 600
+                    ? "Enter a whole number from 1 to 600."
+                    : null;
+              },
+              decoration: const InputDecoration(
+                labelText: "Seconds",
+                helperText: "1–600 seconds",
+              ),
             ),
           ),
           actions: [
@@ -1655,24 +1521,13 @@ Future<void> _startScan() async {
               onPressed: () => Navigator.pop(context),
               child: const Text("Cancel"),
             ),
-            FilledButton(
-              onPressed: () {
-                final value = int.tryParse(controller.text.trim());
-                if (value == null || value < 1 || value > 600) return;
-                Navigator.pop(context, value);
-              },
-              child: const Text("Apply"),
-            ),
+            FilledButton(onPressed: submit, child: const Text("Apply")),
           ],
         );
       },
     );
 
-    controller.dispose();
-
-    if (seconds != null) {
-      onSelected(Duration(seconds: seconds));
-    }
+    if (mounted && seconds != null) onSelected(Duration(seconds: seconds));
   }
 }
 
@@ -1702,32 +1557,128 @@ class _AxisLegend extends StatelessWidget {
   }
 }
 
-class _RawWarning extends StatelessWidget {
-  final String text;
+class _PageContent extends StatelessWidget {
+  const _PageContent({super.key, required this.children, this.maxWidth = 1120});
 
-  const _RawWarning({required this.text});
+  final List<Widget> children;
+  final double maxWidth;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: Colors.amber.shade900,
-        borderRadius: BorderRadius.circular(6),
+    return Center(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: ListView.separated(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+          itemCount: children.length,
+          itemBuilder: (_, index) => children[index],
+          separatorBuilder: (context, index) => const SizedBox(height: 12),
+        ),
       ),
-      child: Row(
-        children: [
-          const Icon(Icons.warning_amber, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(fontWeight: FontWeight.bold),
+    );
+  }
+}
+
+class _SectionCard extends StatelessWidget {
+  const _SectionCard({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: children,
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionHeading extends StatelessWidget {
+  const _SectionHeading(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      header: true,
+      child: Text(text, style: Theme.of(context).textTheme.titleLarge),
+    );
+  }
+}
+
+class _StatusNotice extends StatelessWidget {
+  const _StatusNotice(this.text, {this.announce = true});
+
+  final String text;
+  final bool announce;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Semantics(
+      liveRegion: announce,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: colors.errorContainer,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.warning_amber, color: colors.onErrorContainer),
+            const SizedBox(width: 12),
+            Expanded(
+              child:
+                  Text(text, style: TextStyle(color: colors.onErrorContainer)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LabeledDropdown extends StatelessWidget {
+  const _LabeledDropdown({
+    required this.label,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final List<DropdownMenuItem<int>> items;
+  final ValueChanged<int?>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 232),
+      child: InputDecorator(
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+          enabled: onChanged != null,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+        ),
+        child: Semantics(
+          label: label,
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<int>(
+              value: value,
+              items: items,
+              onChanged: onChanged,
+              isExpanded: true,
             ),
           ),
-        ],
+        ),
       ),
     );
   }

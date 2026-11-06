@@ -58,7 +58,8 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: BleImuApp()));
     await tester.tap(find.byIcon(Icons.search));
     await tester.pump();
-    ble.updateScanResult(BleDevice(deviceId: 'test-device', name: 'Sensor'));
+    ble.updateScanResult(
+        BleDevice(deviceId: 'test-device', name: 'XIAO-IMU-RAW Test'));
     await tester.pump();
     await tester.tap(find.text('CONNECT'));
     for (var i = 0; i < 15; i++) {

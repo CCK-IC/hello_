@@ -1,9 +1,16 @@
 import "protocol.dart";
 
 enum RawSensorType {
-  accelerometer,
-  gyroscope,
-  magnetometer,
+  accelerometer('Accelerometer', 'g'),
+  gyroscope('Gyroscope', '°/s'),
+  magnetometer('Magnetometer', 'counts');
+
+  const RawSensorType(this.label, this.unit);
+
+  final String label;
+  final String unit;
+
+  String get chartLabel => '$label ($unit)';
 }
 
 class RawImuHistoryPoint {

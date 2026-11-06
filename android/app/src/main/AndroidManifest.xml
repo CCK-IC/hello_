@@ -11,7 +11,7 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
 
     <application
-        android:label="hello_"
+        android:label="BLE IMU Monitor"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

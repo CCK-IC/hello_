@@ -14,6 +14,12 @@ rootProject.layout.buildDirectory.value(newBuildDir)
 subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
+    // universal_ble configures Kotlin using the built-in AGP extension.
+    if (name == "universal_ble") {
+        pluginManager.withPlugin("com.android.library") {
+            pluginManager.apply("com.android.built-in-kotlin")
+        }
+    }
 }
 subprojects {
     project.evaluationDependsOn(":app")

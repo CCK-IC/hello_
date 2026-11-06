@@ -1,12 +1,13 @@
 {
-    "name": "hello_",
-    "short_name": "hello_",
+    "name": "BLE IMU Monitor",
+    "short_name": "BLE IMU Monitor",
+    "lang": "en",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#0D6F73",
+    "theme_color": "#0D6F73",
+    "description": "Monitor motion data from Bluetooth Low Energy IMU sensors.",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
         {

@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 const _deviceId = 'aa:bb:cc:dd:ee:ff';
+const _deviceName = 'XIAO-IMU-RAW Test';
 
 class _FakeBlePlatform extends UniversalBlePlatform {
   bool connected = false;
@@ -83,6 +84,134 @@ Uint8List _auxPacket(int sequence, List<int> channels) {
 }
 
 void main() {
+  testWidgets('native scan requires a project name prefix or service',
+      (tester) async {
+    final ble = _FakeBlePlatform();
+    UniversalBle.setInstance(ble);
+    await tester.pumpWidget(const MaterialApp(home: BleImuApp()));
+    await tester.tap(find.byIcon(Icons.search));
+    await tester.pump();
+
+    const unrelatedId = '11:22:33:44:55:66';
+    ble.updateScanResult(BleDevice(
+      deviceId: unrelatedId,
+      name: 'Nearby XIAO-IMU-RAW',
+      services: [BleUuids.batteryService],
+      serviceData: {BleUuids.batteryService: Uint8List(1)},
+    ));
+    const nameOnly = 'xIaO-iMu-RaW-01';
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: nameOnly));
+    await tester.pump();
+
+    expect(find.text(nameOnly), findsOneWidget);
+    expect(find.text(unrelatedId), findsNothing);
+    expect(find.text('CONNECT'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final (serviceName, uuid) in [
+    ('IMU', BleUuids.imuService),
+    ('auxiliary', BleUuids.auxiliaryService),
+    ('status', BleUuids.deviceStatusService),
+  ]) {
+    testWidgets(
+        'native scan accepts $serviceName UUIDs without a matching name',
+        (tester) async {
+      final ble = _FakeBlePlatform();
+      UniversalBle.setInstance(ble);
+      await tester.pumpWidget(const MaterialApp(home: BleImuApp()));
+      await tester.tap(find.byIcon(Icons.search));
+      await tester.pump();
+
+      const serviceDataId = '11:22:33:44:55:66';
+      ble.updateScanResult(BleDevice(
+        deviceId: _deviceId,
+        name: null,
+        services: [uuid],
+      ));
+      ble.updateScanResult(BleDevice(
+        deviceId: serviceDataId,
+        name: 'Sensor',
+        serviceData: {uuid: Uint8List(1)},
+      ));
+      await tester.pump();
+
+      expect(find.text(_deviceId), findsOneWidget);
+      expect(find.text(serviceDataId), findsOneWidget);
+      expect(find.text('CONNECT'), findsNWidgets(2));
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('native scan lists a later qualifying advertisement only once',
+      (tester) async {
+    final ble = _FakeBlePlatform();
+    UniversalBle.setInstance(ble);
+    await tester.pumpWidget(const MaterialApp(home: BleImuApp()));
+    await tester.tap(find.byIcon(Icons.search));
+    await tester.pump();
+
+    const name = 'Sensor';
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: name));
+    await tester.pump();
+    expect(find.text(_deviceId), findsNothing);
+
+    ble.updateScanResult(BleDevice(
+      deviceId: _deviceId,
+      name: name,
+      services: [BleUuids.imuService],
+    ));
+    await tester.pump();
+    expect(find.text(_deviceId), findsOneWidget);
+
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: _deviceName));
+    await tester.pump();
+    expect(find.text(_deviceId), findsOneWidget);
+    expect(find.text('CONNECT'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('narrow dashboard supports dark mode and large text',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(360, 700));
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+      tester.platformDispatcher.clearTextScaleFactorTestValue();
+      tester.platformDispatcher.clearPlatformBrightnessTestValue();
+    });
+    final ble = _FakeBlePlatform();
+    UniversalBle.setInstance(ble);
+    await tester.pumpWidget(const BleImuMonitor());
+    expect(Theme.of(tester.element(find.text('Find devices'))).brightness,
+        Brightness.dark);
+    await tester.tap(find.byTooltip('Search for Bluetooth devices'));
+    await tester.pump();
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: _deviceName));
+    await tester.pump();
+    await tester.scrollUntilVisible(find.text('CONNECT'), 250);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CONNECT'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Analyze IMU data'), findsOneWidget);
+    expect(find.byTooltip('Disconnect sensor'), findsOneWidget);
+    for (final heading in [
+      'Device telemetry',
+      'Raw ICM-20948 Data',
+      'BLE subscriptions',
+      'Raw data visualization',
+      'ADC auxiliary · raw counts',
+      'Control Commands',
+    ]) {
+      await tester.scrollUntilVisible(find.text(heading), 250,
+          scrollable: find.byType(Scrollable).first);
+    }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('analysis page receives live packets from the connected device',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 1600));
@@ -92,7 +221,7 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: BleImuApp()));
     await tester.tap(find.byIcon(Icons.search));
     await tester.pump();
-    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: 'Test IMU'));
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: _deviceName));
     await tester.pump();
     await tester.tap(find.text('CONNECT'));
     await tester.pumpAndSettle();
@@ -136,9 +265,9 @@ void main() {
 
     await tester.tap(find.byIcon(Icons.search));
     await tester.pump();
-    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: 'Test IMU'));
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: _deviceName));
     await tester.pump();
-    expect(find.text('Test IMU'), findsOneWidget);
+    expect(find.text(_deviceName), findsOneWidget);
     await tester.tap(find.text('CONNECT'));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.link_off), findsOneWidget);

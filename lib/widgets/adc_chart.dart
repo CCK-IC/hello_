@@ -16,18 +16,29 @@ class AdcChart extends StatefulWidget {
   State<AdcChart> createState() => _AdcChartState();
 }
 
-class _AdcChartState extends State<AdcChart> with AutomaticKeepAliveClientMixin {
+class _AdcChartState extends State<AdcChart>
+    with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
-  static const colors = [
-    Colors.redAccent,
-    Colors.green,
-    Colors.lightBlue,
-    Colors.orange,
-    Colors.purpleAccent,
-    Colors.teal,
-    Colors.pink,
-    Colors.amber
+  static const _lightColors = [
+    Color(0xFF9C322A),
+    Color(0xFF276A38),
+    Color(0xFF255C9B),
+    Color(0xFF935016),
+    Color(0xFF67429B),
+    Color(0xFF006C69),
+    Color(0xFF9D3268),
+    Color(0xFF645614),
+  ];
+  static const _darkColors = [
+    Color(0xFFFFB4AB),
+    Color(0xFF9CDAA0),
+    Color(0xFFA4C9FF),
+    Color(0xFFFFB77F),
+    Color(0xFFD5BBFF),
+    Color(0xFF83D6D1),
+    Color(0xFFFFB0D2),
+    Color(0xFFD9C979),
   ];
   final selected = List<bool>.filled(8, true);
 
@@ -41,9 +52,19 @@ class _AdcChartState extends State<AdcChart> with AutomaticKeepAliveClientMixin 
             (p) => !p.receivedAt.isBefore(start) && !p.receivedAt.isAfter(now))
         .toList();
     final latest = widget.history.isEmpty ? null : widget.history.last.sample;
+    final scheme = Theme.of(context).colorScheme;
+    final colors =
+        scheme.brightness == Brightness.dark ? _darkColors : _lightColors;
+    final visibleChannels = [
+      for (var i = 0; i < selected.length; i++)
+        if (selected[i]) i + 1,
+    ];
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('ADC auxiliary · raw counts',
-          style: Theme.of(context).textTheme.titleMedium),
+      Semantics(
+        header: true,
+        child: Text('ADC auxiliary · raw counts',
+            style: Theme.of(context).textTheme.titleLarge),
+      ),
       if (latest != null)
         Text(
             'Sequence ${latest.sequence} · device time ${latest.timestampMs} ms'),
@@ -54,20 +75,35 @@ class _AdcChartState extends State<AdcChart> with AutomaticKeepAliveClientMixin 
           children: List.generate(
               8,
               (i) => FilterChip(
-                    label: Text('CH${i + 1}: ${latest?.channels[i] ?? "—"}'),
+                    label: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.circle, color: colors[i], size: 10),
+                      const SizedBox(width: 6),
+                      Flexible(
+                          child: Text(
+                              'CH${i + 1}: ${latest?.channels[i] ?? "—"}')),
+                    ]),
                     selected: selected[i],
-                    selectedColor: colors[i].withAlpha(64),
                     onSelected: (value) => setState(() => selected[i] = value),
                   ))),
       const SizedBox(height: 8),
       SizedBox(
           height: 220,
           width: double.infinity,
-          child: points.isEmpty
-              ? const Center(child: Text('Waiting for auxiliary ADC data...'))
-              : CustomPaint(
-                  painter: _AdcPainter(points, List.of(selected), start, now,
-                      Theme.of(context).colorScheme.onSurface))),
+          child: visibleChannels.isEmpty
+              ? const Center(
+                  child: Text('Select a channel to show it on the chart.'))
+              : points.isEmpty
+                  ? const Center(
+                      child: Text('Waiting for auxiliary ADC data...'))
+                  : Semantics(
+                      label:
+                          'ADC chart, last ${widget.visiblePeriod.inSeconds} seconds. '
+                          'Showing channels ${visibleChannels.join(', ')}.',
+                      child: CustomPaint(
+                        painter: _AdcPainter(points, List.of(selected), start,
+                            now, scheme.onSurfaceVariant, colors),
+                      ),
+                    )),
     ]);
   }
 }
@@ -77,13 +113,14 @@ class _AdcPainter extends CustomPainter {
   final List<bool> selected;
   final DateTime start, end;
   final Color foreground;
-  _AdcPainter(
-      this.points, this.selected, this.start, this.end, this.foreground);
+  final List<Color> colors;
+  _AdcPainter(this.points, this.selected, this.start, this.end, this.foreground,
+      this.colors);
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (size.width <= 55 || size.height <= 30) return;
-    final plot = Rect.fromLTRB(48, 8, size.width - 8, size.height - 24);
+    if (size.width <= 66 || size.height <= 30) return;
+    final plot = Rect.fromLTRB(58, 8, size.width - 8, size.height - 24);
     var minValue = double.infinity, maxValue = double.negativeInfinity;
     for (final p in points) {
       for (var i = 0; i < 8; i++) {
@@ -100,10 +137,11 @@ class _AdcPainter extends CustomPainter {
     void label(String text, Offset offset) {
       final painter = TextPainter(
           text: TextSpan(
-              text: text, style: TextStyle(color: foreground, fontSize: 10)),
+              text: text, style: TextStyle(color: foreground, fontSize: 11)),
           textDirection: TextDirection.ltr)
         ..layout();
       painter.paint(canvas, offset);
+      painter.dispose();
     }
 
     for (var i = 0; i <= 4; i++) {
@@ -137,14 +175,13 @@ class _AdcPainter extends CustomPainter {
           path.lineTo(x, y);
         }
         if (points.length == 1) {
-          canvas.drawCircle(
-              Offset(x, y), 2, Paint()..color = _AdcChartState.colors[channel]);
+          canvas.drawCircle(Offset(x, y), 2, Paint()..color = colors[channel]);
         }
       }
       canvas.drawPath(
           path,
           Paint()
-            ..color = _AdcChartState.colors[channel]
+            ..color = colors[channel]
             ..style = PaintingStyle.stroke
             ..strokeWidth = 1.5);
     }

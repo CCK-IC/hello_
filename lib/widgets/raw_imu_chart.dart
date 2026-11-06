@@ -5,6 +5,11 @@ import "package:flutter/material.dart";
 import "../models/raw_imu_history.dart";
 
 class RawImuChart extends StatelessWidget {
+  static List<Color> axisColors(Brightness brightness) =>
+      brightness == Brightness.dark
+          ? const [Color(0xFFFFB4AB), Color(0xFF9CDAA0), Color(0xFFA4C9FF)]
+          : const [Color(0xFF9C322A), Color(0xFF276A38), Color(0xFF255C9B)];
+
   final List<RawImuHistoryPoint> history;
   final RawSensorType sensor;
   final Duration visiblePeriod;
@@ -51,16 +56,25 @@ class RawImuChart extends StatelessWidget {
       );
     }
 
-    return SizedBox(
-      height: 240,
-      width: double.infinity,
-      child: CustomPaint(
-        painter: _RawImuChartPainter(
-          points: points,
-          sensor: sensor,
-          start: start,
-          end: now,
-          gridColor: Colors.white12,
+    final colors = Theme.of(context).colorScheme;
+    final values = points.last.valuesFor(sensor)!;
+    return Semantics(
+      label: '${sensor.label} chart, last ${visiblePeriod.inSeconds} seconds',
+      value: 'Latest ${sensor.unit}: X ${values[0].toStringAsFixed(2)}, '
+          'Y ${values[1].toStringAsFixed(2)}, Z ${values[2].toStringAsFixed(2)}',
+      child: SizedBox(
+        height: 240,
+        width: double.infinity,
+        child: CustomPaint(
+          painter: _RawImuChartPainter(
+            points: points,
+            sensor: sensor,
+            start: start,
+            end: now,
+            gridColor: colors.outlineVariant,
+            labelColor: colors.onSurfaceVariant,
+            axisColors: axisColors(colors.brightness),
+          ),
         ),
       ),
     );
@@ -72,7 +86,8 @@ class _RawImuChartPainter extends CustomPainter {
   final RawSensorType sensor;
   final DateTime start;
   final DateTime end;
-  final Color gridColor;
+  final Color gridColor, labelColor;
+  final List<Color> axisColors;
 
   const _RawImuChartPainter({
     required this.points,
@@ -80,17 +95,13 @@ class _RawImuChartPainter extends CustomPainter {
     required this.start,
     required this.end,
     required this.gridColor,
+    required this.labelColor,
+    required this.axisColors,
   });
-
-  static const _axisColors = [
-    Colors.redAccent,
-    Colors.greenAccent,
-    Colors.lightBlueAccent,
-  ];
 
   @override
   void paint(Canvas canvas, Size size) {
-    const left = 46.0;
+    const left = 62.0;
     const right = 8.0;
     const top = 12.0;
     const bottom = 26.0;
@@ -140,8 +151,7 @@ class _RawImuChartPainter extends CustomPainter {
 
     double xFor(DateTime timestamp) {
       final elapsedUs = timestamp.difference(start).inMicroseconds;
-      return plot.left +
-          (elapsedUs / durationUs).clamp(0.0, 1.0) * plot.width;
+      return plot.left + (elapsedUs / durationUs).clamp(0.0, 1.0) * plot.width;
     }
 
     double yFor(double value) {
@@ -171,7 +181,7 @@ class _RawImuChartPainter extends CustomPainter {
       canvas.drawPath(
         path,
         Paint()
-          ..color = _axisColors[axis]
+          ..color = axisColors[axis]
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1.5
           ..isAntiAlias = true,
@@ -204,15 +214,16 @@ class _RawImuChartPainter extends CustomPainter {
     final painter = TextPainter(
       text: TextSpan(
         text: text,
-        style: const TextStyle(
-          color: Colors.white54,
-          fontSize: 10,
+        style: TextStyle(
+          color: labelColor,
+          fontSize: 11,
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
 
     painter.paint(canvas, offset);
+    painter.dispose();
   }
 
   @override
@@ -220,6 +231,9 @@ class _RawImuChartPainter extends CustomPainter {
     return oldDelegate.points != points ||
         oldDelegate.sensor != sensor ||
         oldDelegate.start != start ||
-        oldDelegate.end != end;
+        oldDelegate.end != end ||
+        oldDelegate.axisColors != axisColors ||
+        oldDelegate.labelColor != labelColor ||
+        oldDelegate.gridColor != gridColor;
   }
 }

@@ -172,3 +172,19 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
   settings, side by side on wide layouts and stacked on narrow screens.
   Waiting and unavailable states remain explicit. Targeted layout and
   mocked BLE integration tests passed; no new hardware run was performed.
+
+## Stable V2
+
+- `Stable-V2` starts from `NO_DMP` at `e13ac45`. The dashboard, controls, and
+  frequency analysis share a Material 3 theme that follows the system
+  appearance. The main screens support larger text and expose labels for
+  controls, chart summaries, and connection states.
+- Removed the unused quaternion demo and retired widget-test backup. The
+  simulated BLE, ADC, control, analysis, and CSV checks still pass.
+- The native scanner lists sensors by the `XIAO-IMU-RAW` name prefix or a
+  supported service UUID. After this change, 59 Flutter VM tests and the
+  Chrome chooser test passed. Native discovery used simulated advertisements.
+- Verification on the Mac: 54 Flutter VM tests, 16 Chrome tests, clean static
+  analysis, web release, Android and macOS debug builds, and unsigned iOS
+  device and arm64 simulator builds. Windows and Linux native runs and
+  physical BLE testing remain open.

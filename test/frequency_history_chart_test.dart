@@ -77,4 +77,46 @@ void main() {
                 now: now))));
     expect(find.text('Waiting for frequency estimates...'), findsOneWidget);
   });
+
+  testWidgets('chart describes the visible window and selected series',
+      (tester) async {
+    final now = DateTime(2026).add(const Duration(seconds: 10));
+    const seed = Color(0xFF0D6F73);
+    await tester.binding.setSurfaceSize(const Size(320, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData(
+        colorScheme:
+            ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
+      ),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context)
+            .copyWith(textScaler: const TextScaler.linear(2)),
+        child: child!,
+      ),
+      home: Scaffold(
+        body: FrequencyHistoryChart(
+          history: [point(3, peak: 5), point(8, peak: 2), point(9, peak: null)],
+          visiblePeriod: const Duration(seconds: 5),
+          selected: FrequencySeries.values.toSet(),
+          now: now,
+        ),
+      ),
+    ));
+
+    final summary = find.bySemanticsLabel(RegExp(r'^Frequency history over'));
+    expect(
+      tester.getSemantics(summary),
+      containsSemantics(
+        isImage: true,
+        label: 'Frequency history over the last 5 seconds. '
+            'The frequency axis runs from 0 Hz to 2.2 Hz. '
+            'The latest plotted peak for Percussion band was 2.00 Hz, 2 seconds ago. '
+            'Vibration band has no estimate in this window. '
+            'Gaps mark missing estimates or changes in sensor or band settings.',
+      ),
+    );
+    expect(find.text('2.2 Hz'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

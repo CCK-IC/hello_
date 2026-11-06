@@ -195,9 +195,12 @@ void main() {
     expect(rows, hasLength(3)); // header plus one row per band
     expect(rows.first, contains('estimate_time_utc'));
     expect(rows[1], contains('accelerometer'));
-    expect(rows[1], contains('Percussion band'));
-    expect(rows[1], contains('Percussion band,1.0,5.0,'));
-    expect(rows[2], contains('Vibration band,6.5,10.0,'));
+    final percussion = rows[1].split(',');
+    final vibration = rows[2].split(',');
+    expect(percussion[8], 'Percussion band');
+    expect(percussion.sublist(9, 11).map(double.parse), [1.0, 5.0]);
+    expect(vibration[8], 'Vibration band');
+    expect(vibration.sublist(9, 11).map(double.parse), [6.5, 10.0]);
     await tester.pumpWidget(const SizedBox());
     unawaited(samples.close());
   });
@@ -259,15 +262,85 @@ void main() {
     unawaited(samples.close());
   });
 
-  testWidgets('controls fit a narrow phone screen', (tester) async {
+  testWidgets('controls reflow at 200% text size on a narrow phone',
+      (tester) async {
     await tester.binding.setSurfaceSize(const Size(320, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final samples = StreamController<RawImuHistoryPoint?>(sync: true);
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0D6F73)),
+      ),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context)
+            .copyWith(textScaler: const TextScaler.linear(2)),
+        child: child!,
+      ),
+      home: ImuAnalysisPage(samples: samples.stream),
+    ));
+    final pageScroll = find
+        .descendant(
+            of: find.byType(ListView), matching: find.byType(Scrollable))
+        .first;
+    final minimum = find.widgetWithText(TextField, 'Percussion min');
+    final maximum = find.widgetWithText(TextField, 'Percussion max');
+    await tester.scrollUntilVisible(minimum, 300, scrollable: pageScroll);
+    await tester.ensureVisible(maximum);
+    expect(tester.getTopLeft(maximum).dx, tester.getTopLeft(minimum).dx);
+    expect(tester.getTopLeft(maximum).dy,
+        greaterThan(tester.getTopLeft(minimum).dy));
+    await tester.scrollUntilVisible(find.text('Record CSV'), 300,
+        scrollable: pageScroll);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    unawaited(samples.close());
+  });
+
+  testWidgets('duration controls announce their names, values and actions',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 2400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final samples = StreamController<RawImuHistoryPoint?>(sync: true);
     await tester.pumpWidget(
         MaterialApp(home: ImuAnalysisPage(samples: samples.stream)));
-    await tester.drag(find.byType(ListView), const Offset(0, -500));
-    await tester.pump();
-    expect(tester.takeException(), isNull);
+
+    await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+    await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    expect(tester.getSemantics(find.bySemanticsLabel('Frequency history')),
+        containsSemantics(isHeader: true));
+    for (final entry in {
+      'Display window': '10 seconds',
+      'History buffer': '10 minutes',
+      'Recording duration': '10 seconds',
+    }.entries) {
+      expect(
+        tester.getSemantics(find.bySemanticsLabel(entry.key)),
+        containsSemantics(
+          label: entry.key,
+          value: entry.value,
+          isButton: true,
+          isEnabled: true,
+          hasTapAction: true,
+        ),
+      );
+    }
+    await tester.tap(find.text('10 seconds').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Custom').last);
+    await tester.pumpAndSettle();
+    final customDuration = find.widgetWithText(TextField, 'Seconds (1–3600)');
+    await tester.enterText(customDuration, '0');
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+    expect(find.text('Enter a whole number from 1 to 3600.'), findsOneWidget);
+    await tester.enterText(customDuration, '17');
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Recording duration')),
+      containsSemantics(value: '17 seconds', hasTapAction: true),
+    );
+
     await tester.pumpWidget(const SizedBox());
     unawaited(samples.close());
   });
