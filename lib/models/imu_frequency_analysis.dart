@@ -47,13 +47,13 @@ class ImuFrequencyAnalysis {
 /// rotation; it is not a diagnosis or a count of therapeutic actions.
 class ImuFrequencyAnalyzer {
   static const defaultBands = <FrequencyBand>[
-    FrequencyBand('Lower band', 0.5, 5),
-    FrequencyBand('Higher band', 5, 12),
+    FrequencyBand('Lower band', 0.5, 6.5),
+    FrequencyBand('Higher band', 5, 12.5),
   ];
 
   static ImuFrequencyAnalysis analyze(
     List<RawImuHistoryPoint> points, {
-    Duration window = const Duration(seconds: 8),
+    Duration window = const Duration(seconds: 4),
     List<FrequencyBand> bands = defaultBands,
     RawSensorType sensor = RawSensorType.accelerometer,
   }) {

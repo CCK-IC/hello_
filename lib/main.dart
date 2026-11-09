@@ -555,7 +555,7 @@ Future<void> _startScan() async {
     // Android can request an MTU; other platforms negotiate it themselves.
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       final mtu = await UniversalBle.requestMtu(
-        deviceId, 128, timeout: const Duration(seconds: 15));
+        deviceId, 247, timeout: const Duration(seconds: 15));
       if (mtu < 25) {
         throw StateError("ADC requires BLE MTU 25 or greater (negotiated $mtu)");
       }

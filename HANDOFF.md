@@ -171,3 +171,12 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
   settings, side by side on wide layouts and stacked on narrow screens.
   Waiting and unavailable states remain explicit. Targeted layout and
   mocked BLE integration tests passed; no new hardware run was performed.
+
+## Windows rate-change disconnect investigation, 2026-11-04
+
+- `ab45bfd` was pushed to origin/NO_DMP. The subsequent command-generation guard and opt-in timestamped command logging are in local commit `61d33dd`; at the time of this note it is one commit ahead of origin. Preserve the separately modified Android MTU setting in lib/main.dart.
+- A native plugin probe with raw, auxiliary and status enabled completed two 25→50→100→25→100 Hz cycles without an unexpected disconnect. In the serial-monitored run, 25 and 50 Hz produced no new firmware drops over 10 seconds each; at 100 Hz the firmware logged raw and AUX enqueue failures rc=6 (BLE_HS_ENOMEM), and drops rose. The glove was deliberately disconnected after the probe.
+- The full native dashboard reproduced the user's unexpected disconnect while switching roughly 40–75 Hz with all three streams enabled. The app reported connected=false with no error after 9,271 packets and 155 inferred sequence gaps. The exact selected rate and firmware disconnect reason were not captured. This is not proof that the UI caused the disconnect.
+- The now-clean Glove_Firmware checkout at 6e3ce08 contains the previously tested f97e7c8 revision and the observed enqueue error. Its local sdkconfig uses a 100 Hz FreeRTOS tick: integer period truncation can schedule 40–50 Hz requests near 50 Hz and 51–75 Hz requests near 100 Hz, increasing raw/AUX traffic. The flashed device's tick configuration has not been confirmed. No firmware was modified or flashed.
+- Next: run the full native dashboard with BLE_DIAGNOSTICS=true and simultaneous COM4 capture while switching 40–75 Hz, correlating the last command, firmware ENOMEM counts, negotiated connection parameters and disconnect reason. Opening COM4 has previously reset the board. The command safeguard handles stale completion; it has not been shown to prevent this disconnect.
+- Windows debug build passed on 2026-11-04; 12 targeted command/control tests passed. Hardware readiness is pending.
