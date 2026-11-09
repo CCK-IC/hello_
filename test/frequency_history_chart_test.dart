@@ -19,10 +19,10 @@ FrequencyHistoryPoint point(int second,
       duration: const Duration(seconds: 8),
       sampleCount: 200,
       bands: [
-        FrequencyBandResult(FrequencyBand('Percussion band', 0.5, max), peak,
+        FrequencyBandResult(FrequencyBand('Percussion band', 1, max), peak,
             peak == null ? 'No peak' : null),
         const FrequencyBandResult(
-            FrequencyBand('Vibration band', 5, 12), null, 'Unavailable'),
+            FrequencyBand('Vibration band', 6.5, 10), null, 'Unavailable'),
       ],
     ),
   );

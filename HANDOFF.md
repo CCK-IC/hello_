@@ -10,7 +10,7 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
 
 - App `8f3296c` stabilized Mac Chrome BLE streaming and controls; `f086047` subsequently attempted to improve the Windows BLE connection lifecycle. The latter is **not verified on Windows native or Chrome hardware**.
 - The firmware repository on this Mac currently has HEAD `f97e7c83cabda4158e3f3f6879b34a17116fdc50` (`Refactor sensor firmware and stabilize BLE streaming`). An earlier session reported firmware commit `6b8093b`; it exists locally, but check the destination checkout's history rather than assuming its state.
-- Mac Chrome testing with the board nearby succeeded at 10 Hz: a recovery command completed, streaming continued for a minute, and the reported drop counter did not increase. Earlier tests saw radio timeouts and BLE buffer exhaustion; 25 Hz still showed occasional drops. The app defaults to 10 Hz on Mac Chrome and 25 Hz on Windows.
+- Mac Chrome testing with the board nearby succeeded at 10 Hz: a recovery command completed, streaming continued for a minute, and the reported drop counter did not increase. Earlier tests saw radio timeouts and BLE buffer exhaustion; 25 Hz still showed occasional drops. The app now requests 45 Hz by default; that rate has not been verified in this hardware session.
 - Firmware changes include requesting a longer BLE supervision timeout and clearing stale subscriptions on disconnect. Build and flash state on another machine or board must be checked independently.
 
 ## Next session
@@ -154,7 +154,8 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
 ## Frequency history and recording, 2026-11-02
 
 - The live analysis page plots candidate peaks for selected percussion and
-  vibration search bands. Display duration (10 s to 5 min) and retained
+  vibration search bands, initially 1–5 Hz and 6.5–10 Hz respectively.
+  Display duration (10 s to 5 min) and retained
   frequency-history duration (1 to 60 min, capped at 3600 estimates) are
   independently selectable. Plot lines break across missing estimates,
   timing gaps, sensor changes and band changes. History is page/session scoped.
@@ -180,3 +181,8 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
 - The now-clean Glove_Firmware checkout at 6e3ce08 contains the previously tested f97e7c8 revision and the observed enqueue error. Its local sdkconfig uses a 100 Hz FreeRTOS tick: integer period truncation can schedule 40–50 Hz requests near 50 Hz and 51–75 Hz requests near 100 Hz, increasing raw/AUX traffic. The flashed device's tick configuration has not been confirmed. No firmware was modified or flashed.
 - Next: run the full native dashboard with BLE_DIAGNOSTICS=true and simultaneous COM4 capture while switching 40–75 Hz, correlating the last command, firmware ENOMEM counts, negotiated connection parameters and disconnect reason. Opening COM4 has previously reset the board. The command safeguard handles stale completion; it has not been shown to prevent this disconnect.
 - Windows debug build passed on 2026-11-04; 12 targeted command/control tests passed. Hardware readiness is pending.
+
+## NO_DMP merge, 2026-11-09
+
+- Merged the remote default rate and frequency bands with the local Windows BLE command safeguards, Android MTU request, and four-second analysis window. The newer remote default search bands are 1–5 Hz and 6.5–10 Hz; the earlier local band edits remain in the preceding local commit.
+- Updated analysis tests for the four-second window; 28 targeted analysis, control and dashboard tests passed. No new hardware test was performed, and the native rate-change disconnect remains under investigation.

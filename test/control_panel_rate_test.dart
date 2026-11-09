@@ -27,7 +27,8 @@ void main() {
       (tester) async {
     await showPanel(tester, send: (_) async {});
     expect(find.text('Stream rate has not been set by this app'), findsOneWidget);
-    expect(find.text('Last rate set by app: 25 Hz'), findsNothing);
+    expect(find.text('Notification Stream Rate: 45 Hz'), findsOneWidget);
+    expect(find.text('Last rate set by app: 45 Hz'), findsNothing);
   });
 
   testWidgets('shows the rate successfully sent during connection setup',
