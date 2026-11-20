@@ -6,7 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  Future<void> showPanel(WidgetTester tester, {
+  Future<void> showPanel(
+    WidgetTester tester, {
     int? initialRate,
     required Future<void> Function(BleControlCommand) send,
   }) async {
@@ -26,8 +27,9 @@ void main() {
   testWidgets('does not claim a rate when none was sent by the app',
       (tester) async {
     await showPanel(tester, send: (_) async {});
-    expect(find.text('Stream rate has not been set by this app'), findsOneWidget);
-    expect(find.text('Notification Stream Rate: 45 Hz'), findsOneWidget);
+    expect(
+        find.text('Stream rate has not been set by this app'), findsOneWidget);
+    expect(find.text('IMU Sample Rate: 45 Hz'), findsOneWidget);
     expect(find.text('Last rate set by app: 45 Hz'), findsNothing);
   });
 
@@ -47,7 +49,8 @@ void main() {
     await tester.pump();
 
     final command = commands.single as SetRateCommand;
-    expect(find.text('Last rate set by app: ${command.rateHz} Hz'), findsOneWidget);
+    expect(find.text('Last rate set by app: ${command.rateHz} Hz'),
+        findsOneWidget);
   });
 
   testWidgets('a failed rate write does not change the last sent rate',
@@ -63,15 +66,20 @@ void main() {
     expect(find.text('Last rate set by app: 25 Hz'), findsOneWidget);
     expect(find.textContaining('write failed'), findsOneWidget);
   });
-  testWidgets('controller tracks setup, reconnect, and stale writes', (tester) async {
+  testWidgets('controller tracks setup, reconnect, and stale writes',
+      (tester) async {
     final controller = ControlPanelController(requestedRate: 42);
     addTearDown(controller.dispose);
     controller.markRateRestored(42);
     final pending = Completer<void>();
-    Widget panel() => MaterialApp(home: Scaffold(body: SingleChildScrollView(
-      child: ControlPanel(controller: controller, commandHistory: const [],
-          onSendCommand: (_) => pending.future),
-    )));
+    Widget panel() => MaterialApp(
+            home: Scaffold(
+                body: SingleChildScrollView(
+          child: ControlPanel(
+              controller: controller,
+              commandHistory: const [],
+              onSendCommand: (_) => pending.future),
+        )));
     await tester.pumpWidget(panel());
     expect(find.text('Last rate set by app: 42 Hz'), findsOneWidget);
     final slider = tester.widgetList<Slider>(find.byType(Slider)).first;
@@ -93,8 +101,11 @@ void main() {
     final controller = ControlPanelController(requestedRate: 42);
     addTearDown(controller.dispose);
     final pending = Completer<void>();
-    await tester.pumpWidget(MaterialApp(home: Scaffold(body: ControlPanel(
-      controller: controller, commandHistory: const [],
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: ControlPanel(
+      controller: controller,
+      commandHistory: const [],
       onSendCommand: (_) => pending.future,
     ))));
     final slider = tester.widgetList<Slider>(find.byType(Slider)).first;
@@ -106,5 +117,4 @@ void main() {
     expect(controller.lastRateSetByApp, 50);
     expect(controller.requestedRate, 50);
   });
-
 }

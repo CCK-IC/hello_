@@ -48,8 +48,7 @@ class _AdcChartState extends State<AdcChart>
     final now = DateTime.now();
     final start = now.subtract(widget.visiblePeriod);
     final points = widget.history
-        .where(
-            (p) => !p.receivedAt.isBefore(start) && !p.receivedAt.isAfter(now))
+        .where((p) => !p.sampledAt.isBefore(start) && !p.sampledAt.isAfter(now))
         .toList();
     final latest = widget.history.isEmpty ? null : widget.history.last.sample;
     final scheme = Theme.of(context).colorScheme;
@@ -163,7 +162,7 @@ class _AdcPainter extends CustomPainter {
         final p = points[i];
         final x = plot.left +
             plot.width *
-                p.receivedAt.difference(start).inMicroseconds /
+                p.sampledAt.difference(start).inMicroseconds /
                 duration;
         final y = plot.bottom -
             plot.height *

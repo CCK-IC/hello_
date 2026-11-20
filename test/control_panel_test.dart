@@ -25,7 +25,7 @@ void main() {
         );
 
     await tester.pumpWidget(panel());
-    expect(find.text('Notification Stream Rate: 10 Hz'), findsOneWidget);
+    expect(find.text('IMU Sample Rate: 10 Hz'), findsOneWidget);
     final sliders = tester.widgetList<Slider>(find.byType(Slider)).toList();
     sliders[0].onChanged!(42);
     sliders[0].onChangeEnd!(42);
@@ -36,19 +36,20 @@ void main() {
     await tester.tap(find.byType(Switch));
     await tester.pump();
     await tester.pumpWidget(panel());
-    expect(find.text('Notification Stream Rate: 42 Hz'), findsOneWidget);
+    expect(find.text('IMU Sample Rate: 42 Hz'), findsOneWidget);
     expect(find.text('Status Update Period: 2000 ms'), findsOneWidget);
     expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
     expect(commands.whereType<SetRateCommand>().single.rateHz, 42);
 
     await tester.pumpWidget(const SizedBox());
     await tester.pumpWidget(panel());
-    expect(find.text('Notification Stream Rate: 42 Hz'), findsOneWidget);
+    expect(find.text('IMU Sample Rate: 42 Hz'), findsOneWidget);
     expect(find.text('Status Update Period: 2000 ms'), findsOneWidget);
     expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
   });
 
-  testWidgets('controls disable while sending and failures restore saved values',
+  testWidgets(
+      'controls disable while sending and failures restore saved values',
       (tester) async {
     final controller = ControlPanelController();
     addTearDown(controller.dispose);
@@ -65,7 +66,8 @@ void main() {
       ),
     ));
 
-    List<Slider> sliders() => tester.widgetList<Slider>(find.byType(Slider)).toList();
+    List<Slider> sliders() =>
+        tester.widgetList<Slider>(find.byType(Slider)).toList();
     sliders()[0].onChanged!(120);
     sliders()[0].onChangeEnd!(120);
     await tester.pump();
@@ -156,7 +158,9 @@ void main() {
     expect(controller.rateUnconfirmed, isTrue);
     expect(controller.lastRateSetByApp, 42);
     expect(find.textContaining('Selected rate not confirmed'), findsOneWidget);
-    expect(find.textContaining('Slow mode changed, but restoring the rate failed'), findsOneWidget);
+    expect(
+        find.textContaining('Slow mode changed, but restoring the rate failed'),
+        findsOneWidget);
 
     // The state survives dashboard removal and reconnect preparation.
     await tester.pumpWidget(const SizedBox());
@@ -195,7 +199,8 @@ void main() {
     expect(controller.rateUnconfirmed, isFalse);
   });
 
-  testWidgets('switching controllers detaches the old listener', (tester) async {
+  testWidgets('switching controllers detaches the old listener',
+      (tester) async {
     final first = ControlPanelController();
     final second = ControlPanelController(requestedRate: 25);
     addTearDown(first.dispose);
@@ -215,7 +220,7 @@ void main() {
     first.requestedRate = 35;
     second.requestedRate = 50;
     await tester.pump();
-    expect(find.text('Notification Stream Rate: 50 Hz'), findsOneWidget);
+    expect(find.text('IMU Sample Rate: 50 Hz'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
     second.requestedRate = 60;
     expect(tester.takeException(), isNull);

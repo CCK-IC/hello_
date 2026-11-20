@@ -16,10 +16,18 @@ enum RawSensorType {
 class RawImuHistoryPoint {
   final DateTime receivedAt;
   final RawImuSample sample;
+  final DateTime? sampleTime;
+  final String? deviceId;
+  final int sessionId;
+
+  DateTime get sampledAt => sampleTime ?? receivedAt;
 
   const RawImuHistoryPoint({
     required this.receivedAt,
     required this.sample,
+    this.sampleTime,
+    this.deviceId,
+    this.sessionId = 0,
   });
 
   List<double>? valuesFor(RawSensorType sensor) {
@@ -41,7 +49,7 @@ class RawImuHistoryPoint {
         ];
 
       case RawSensorType.magnetometer:
-        if (sample.version != 1 ||
+        if ((sample.version != 1 && sample.version != 3) ||
             !sample.flags.magnetometerValid ||
             sample.magnetometerX == null ||
             sample.magnetometerY == null ||

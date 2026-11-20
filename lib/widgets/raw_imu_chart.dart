@@ -25,28 +25,21 @@ class RawImuChart extends StatelessWidget {
   Widget build(BuildContext context) {
     final now = DateTime.now();
     final start = now.subtract(visiblePeriod);
-    // History is time ordered. Skip old samples without scanning the entire
-    // ten minute buffer on every UI refresh.
-    var low = 0;
-    var high = history.length;
-    while (low < high) {
-      final mid = (low + high) ~/ 2;
-      if (history[mid].receivedAt.isBefore(start)) {
-        low = mid + 1;
-      } else {
-        high = mid;
-      }
-    }
+    // Device-derived times can overlap at session boundaries even though
+    // callbacks arrive in order. Filter by sample time across every session.
+    final visible = history
+        .where((p) => !p.sampledAt.isBefore(start) && !p.sampledAt.isAfter(now))
+        .toList();
     final points = <RawImuHistoryPoint>[];
-    final stride = math.max(1, (history.length - low) ~/ 2000);
-    for (var i = low; i < history.length; i += stride) {
-      final point = history[i];
+    final stride = math.max(1, visible.length ~/ 2000);
+    for (var i = 0; i < visible.length; i += stride) {
+      final point = visible[i];
       if (point.valuesFor(sensor) != null) points.add(point);
     }
-    if (low < history.length &&
-        (points.isEmpty || !identical(points.last, history.last)) &&
-        history.last.valuesFor(sensor) != null) {
-      points.add(history.last);
+    if (visible.isNotEmpty &&
+        (points.isEmpty || !identical(points.last, visible.last)) &&
+        visible.last.valuesFor(sensor) != null) {
+      points.add(visible.last);
     }
 
     if (points.length < 2) {
@@ -161,21 +154,23 @@ class _RawImuChartPainter extends CustomPainter {
 
     for (var axis = 0; axis < 3; axis++) {
       final path = Path();
-      var started = false;
+      RawImuHistoryPoint? previousPoint;
 
       for (final point in points) {
         final values = point.valuesFor(sensor);
         if (values == null) continue;
 
-        final x = xFor(point.receivedAt);
+        final x = xFor(point.sampledAt);
         final y = yFor(values[axis]);
 
-        if (!started) {
+        if (previousPoint == null ||
+            point.sessionId != previousPoint.sessionId ||
+            point.deviceId != previousPoint.deviceId) {
           path.moveTo(x, y);
-          started = true;
         } else {
           path.lineTo(x, y);
         }
+        previousPoint = point;
       }
 
       canvas.drawPath(

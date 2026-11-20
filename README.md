@@ -9,6 +9,14 @@ samples or frequency estimates to CSV.
 [Use the dashboard](#use-the-dashboard) · [Analyze motion](#analyze-motion) ·
 [Export CSV](#export-csv) · [BLE protocol](#ble-protocol)
 
+App **1.1.0+2** adds batched protocol v3 support for firmware **1.4.0**, while
+retaining legacy raw/status v1/v2 and AUX v1 decoding. Every accepted local
+sample in a batch reaches history and charts; raw IMU samples also reach
+frequency analysis and CSV recording/export. See the authoritative
+[v3 specification](docs/BATCH_PROTOCOL_V3.md) for the wire format.
+Hardware verification of this release is pending; batching and bounded retries
+do not establish that the previously observed disconnects are fixed.
+
 ## Run the app
 
 You need a BLE-capable host and a powered sensor running firmware that implements
@@ -60,14 +68,21 @@ received rate and device telemetry.
 | Section | What you can do |
 | --- | --- |
 | **Device telemetry** | View IMU state, battery, reported sample and notification rates, uptime, and drop or recovery counters. Enable **Device status** under **BLE subscriptions** if telemetry is off. Status starts off on Windows. |
-| **Raw ICM-20948 Data** | Inspect the latest accelerometer values in g and gyroscope values in °/s, plus their raw counts. Full Raw v1 packets also carry magnetometer and temperature counts. |
+| **Raw ICM-20948 Data** | Inspect the latest accelerometer values in g and gyroscope values in °/s, plus their raw counts. Full Raw v1 and batched v3 packets also carry magnetometer and temperature counts. |
 | **Raw data visualization** | Select multiple signals to plot, set the **Chart time window**, and choose how much raw data the **IMU history buffer** retains (1–60 minutes, default 10 minutes). |
-| **ADC auxiliary** | Enable **Auxiliary sensor** under **BLE subscriptions** and select any of the eight channels. The chart shares the raw IMU time window. The buffer is measured in samples (default 6,000). ADC requires compatible firmware and a negotiated ATT MTU of at least 25. |
-| **Control Commands** | Set the requested notification rate (1–200 Hz, default 45 Hz) or status update period (250–5,000 ms, default 1,000 ms). You can also enable **Slow/Debug Mode**, request **Reinit IMU**, or confirm **Power Off**. |
+| **ADC auxiliary** | Enable **Auxiliary sensor** under **BLE subscriptions** and select any of the eight channels. The chart shares the raw IMU time window. The buffer is measured in samples (default 6,000). Legacy AUX v1 requires ATT MTU ≥25; v3 supports application fragmentation at smaller MTUs. |
+| **Control Commands** | Set the IMU or ADC sample rate (1–200 Hz) or status update period (250–5,000 ms). You can also enable **Slow/Debug Mode**, request **Reinit IMU**, or confirm **Power Off**. |
 
-The requested rate is the setting sent to the sensor. Actual sample and BLE
-notification rates depend on the device and connection. The app follows the
-system light or dark theme and supports larger text and screen-reader labels.
+The IMU rate control sends command `01` and defaults to 45 Hz. The ADC rate
+control sends command `08` and requires firmware 1.4.1 or later with AUX ADC
+enabled. It starts at a 100 Hz selection and displays the last rate accepted by
+the connected device. The app reapplies a previously accepted rate when
+reconnecting to that device. A v3 notification can contain several samples, so
+sensor samples/second and BLE notification packets/second are separate
+measurements. Actual rates depend on the device and connection. Fragmentation
+can also increase packet counts.
+The app follows the system light or dark theme and supports larger text and
+screen-reader labels.
 
 ## Analyze motion
 
@@ -94,11 +109,24 @@ assessment.
 | Raw IMU samples | In **Raw data visualization**, choose a **Recording duration** and select **Record CSV**. The app saves when the timer ends. | **Save buffer CSV** exports the raw history retained by the IMU buffer setting. |
 | Frequency estimates | In **IMU frequency analysis**, choose a **Recording duration** and select **Record CSV**. The app saves when the timer ends, or when you select **Stop and save**. | **Save buffer CSV** exports the estimates retained by the frequency history setting. |
 
-Raw IMU CSV contains one row per received and accepted sample, with receive time,
-device timestamp, sequence, flags, sensor counts, and scaled accelerometer and
-gyroscope values. Fields absent from compact packets are blank. The raw history
-can retain samples across connections, so use a timed recording for a separate
-file per sensor. Keep the sensor connected until that recording finishes.
+Raw IMU CSV contains one row per accepted local sample, including every entry
+in a v3 batch, with device timestamp, sequence, flags, sensor counts, and scaled
+accelerometer and gyroscope values. Fields absent from compact packets are
+blank. Existing columns are preserved; appended columns are `device_id`,
+`session_id`, `glove_slot` (0 for the local glove), and `sample_iso8601`.
+Device/session IDs distinguish retained samples across connections.
+
+`received_iso8601` is the actual callback arrival time (`elapsed_ms` is also
+arrival-based). All samples decoded from one completed batch share that
+callback time; for a fragmented frame, this is the completing callback.
+`sample_iso8601` is a derived sample time: the first batch's newest device
+timestamp is anchored to arrival, then device timestamp deltas preserve sample
+spacing and clock wraparound. Raw and ADC charts use sample time rather than
+collapsing a batch onto one arrival-time coordinate. This is not a synchronized
+wall-clock measurement of acquisition time.
+
+The raw history can retain samples across connections, so use a timed recording
+for a separate file per sensor. Keep the sensor connected until it finishes.
 
 Frequency CSV contains one row per estimate and band, with the selected signal,
 band bounds, sample rate, candidate peak, and the reason when a peak is
@@ -127,13 +155,58 @@ order, and offsets are zero-based.
 
 | Command | Bytes in wire order |
 | --- | --- |
-| Set notification rate | `01` followed by an unsigned 16-bit rate in Hz (1–200) |
+| Set IMU sample rate | `01` followed by an unsigned 16-bit rate in Hz (1–200) |
 | Set status update period | `02` followed by an unsigned 16-bit period in ms (250–60,000 on the wire) |
 | Set slow/debug mode | `04 00` for off, `04 01` for on |
 | Request power-off | `05 A5 5A` |
 | Request sensor recovery | `06` |
 
-### Notification layouts
+### Batched protocol v3 (firmware 1.4.0)
+
+Release test results and limitations: [v3 validation](docs/VALIDATION_V3.md).
+
+The [authoritative v3 specification](docs/BATCH_PROTOCOL_V3.md) defines raw,
+quaternion, AUX and status frames. Service/characteristic UUIDs and control
+command bytes are unchanged. The app continues to decode older firmware's
+v1/v2 packets; firmware 1.4.0 sends v3 custom sensor/status frames. The standard
+Bluetooth Battery Level characteristic remains a one-byte value.
+
+Every v3 frame physically includes two fixed-width glove slots. Slot 0 is the
+local transmitting glove; slot 1 metadata and payload are **zero-filled** in
+every sensor row and status snapshot in this release. The presence mask is
+`0x01`, so reserved bytes never create readings. This reservation consumes real
+frame space and BLE bandwidth. It does not implement second-glove discovery,
+pairing, relay, or synchronization. Decoded records retain glove IDs, and the
+local history/analysis pipeline uses only slot 0.
+
+Sensor frames have a 28-byte header and 1–8 rows containing both slots. Each
+sample reconstructs its original sequence and device timestamp from its slot's
+base and per-row deltas; times are not fabricated from a nominal rate. Status
+is a current snapshot with two 52-byte slots and a 4-byte header (108 bytes).
+Malformed frames are rejected before any sample is emitted.
+
+Preferred ATT MTU is **247**, allowing 244 value bytes. A raw frame fits **four
+rows in 220 bytes** (`28 + 4 × 2 × 24`), including the reserved slot. At MTU 128,
+it fits two rows in 124 bytes. Android requests MTU 247; other platforms manage
+negotiation. The actual negotiated MTU determines capacity, not the request.
+
+When even one row cannot fit (for example, MTU 23), firmware uses ordered `0xF3`
+application fragments. The app reassembles at most one frame per stream, capped
+at 512 bytes and expiring after one second. Missing/out-of-order fragments,
+inconsistent metadata, and invalid lengths are rejected; partial frames emit
+no samples. Reassembly resets on disconnect, unsubscribe, or a new fragment 0.
+Small MTUs reduce throughput even with fragmentation.
+
+Firmware captures acquisition records in bounded **64-sample queues per
+stream**, discarding the oldest unread sample on overflow and counting losses.
+Batches flush after at most **80 ms**; transient enqueue failures retain the
+same prepared frame/fragment for bounded retry, with pending batches expiring
+after **500 ms**. Queues and pending fragments clear at connection/subscription
+boundaries. Sample-discard and permanently dropped-notification counters expose
+losses; these limits do not guarantee delivery through every disconnect or
+resolve all previously reported Windows BLE failures.
+
+### Legacy notification layouts
 
 In the tables, `u8`, `u16`, and `u32` are unsigned integers, and `i16` and
 `i32` are signed integers of the indicated bit width. Firmware can use the
@@ -226,8 +299,10 @@ flutter test
 flutter test --platform chrome test/web_scan_test.dart
 ```
 
-Run with `--dart-define=BLE_DIAGNOSTICS=true` to log received raw packet counts,
-inferred sequence gaps, and the age of the latest notification.
+Run with `--dart-define=BLE_DIAGNOSTICS=true` to log raw notification packet,
+completed frame and decoded sample counts, inferred sequence gaps, malformed
+frames, and the age of the latest notification. Packet counts include fragments
+and must not be interpreted as sample counts.
 
 The Flutter dashboard and BLE lifecycle live in [lib/main.dart](lib/main.dart).
 See [protocol.dart](lib/models/protocol.dart) and

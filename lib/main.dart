@@ -10,6 +10,8 @@ import "models/raw_imu_history.dart";
 import "models/adc_history.dart";
 import "models/protocol.dart";
 import "models/ble_stream_diagnostics.dart";
+import "models/ble_batch_assembler.dart";
+import "models/sample_timeline.dart";
 import "models/subscription_operation_gate.dart";
 import "models/raw_stream_watchdog.dart";
 import "widgets/raw_imu_chart.dart";
@@ -69,7 +71,11 @@ class BleOperationException implements Exception {
 }
 
 class BleImuApp extends StatefulWidget {
-  const BleImuApp({super.key});
+  const BleImuApp({super.key, this.saveCsv});
+
+  /// Override the platform file picker in tests or embedded dashboards.
+  final Future<void> Function(String csv, DateTime startedAt, String prefix)?
+      saveCsv;
 
   @override
   State<BleImuApp> createState() => _BleImuAppState();
@@ -79,6 +85,12 @@ class _BleImuAppState extends State<BleImuApp> {
   static const bool _bleDiagnosticsEnabled =
       bool.fromEnvironment('BLE_DIAGNOSTICS');
   final _streamDiagnostics = BleStreamDiagnostics();
+  final _rawAssembler = BleBatchAssembler(expectedKind: 1);
+  final _adcAssembler = BleBatchAssembler(expectedKind: 3);
+  final _statusAssembler = BleBatchAssembler(expectedKind: 4);
+  final _rawTimeline = SampleTimeline();
+  int _sessionId = 0;
+  int _connectionEpoch = 0;
   Timer? _diagnosticsTimer;
   Timer? _uiRefreshTimer;
   Timer? _scanTimer;
@@ -111,37 +123,96 @@ class _BleImuAppState extends State<BleImuApp> {
   static const Duration _windowsGattDelay = Duration(milliseconds: 350);
   static const Duration _normalGattDelay = Duration(milliseconds: 80);
 
-  void _handleRawValue(Uint8List value) {
-    final sample = RawImuSample.decode(value);
-
-    if (sample == null) {
+  void _handleRawValue(Uint8List value, DateTime receivedAt, String deviceId) {
+    _streamDiagnostics.recordNotification(receivedAt);
+    final assembly = _rawAssembler.add(value, now: receivedAt);
+    if (assembly.invalid) {
+      _streamDiagnostics.recordMalformed();
       _invalidRawPacketCount++;
       _scheduleUiRefresh();
       return;
     }
-
-    final previous = _latestRawSample;
-    if (previous != null &&
-        previous.version == sample.version &&
-        !sample.isNewerThan(previous)) {
+    final frame = assembly.frame;
+    if (frame == null) return;
+    final samples = RawImuSample.decodeAll(frame);
+    if (samples == null) {
+      _streamDiagnostics.recordMalformed();
+      _invalidRawPacketCount++;
+      _scheduleUiRefresh();
       return;
     }
+    _streamDiagnostics.recordFrame(samples);
 
-    final point = RawImuHistoryPoint(
-      receivedAt: DateTime.now(),
-      sample: sample,
+    // Validate/decode the whole frame before committing any local reading.
+    final accepted = <RawImuSample>[];
+    var previous = _latestRawSample;
+    for (final sample in samples) {
+      if (sample.gloveId != 0) continue;
+      if (previous != null &&
+          previous.version == sample.version &&
+          !sample.isNewerThan(previous)) {
+        continue;
+      }
+      accepted.add(sample);
+      previous = sample;
+    }
+    if (accepted.isEmpty) return;
+
+    final times = _rawTimeline.mapBatch(
+      accepted.map((sample) => sample.timestampMs).toList(),
+      receivedAt,
     );
-
-    _latestRawSample = sample;
-    _rawHistory.add(point);
-    _analysisSamples.add(point);
-
-    if (_recordingRawCsv) {
-      _rawRecording.add(point);
+    final points = List.generate(
+      accepted.length,
+      (i) => RawImuHistoryPoint(
+        receivedAt: receivedAt,
+        sampleTime: times[i],
+        sample: accepted[i],
+        deviceId: deviceId,
+        sessionId: _sessionId,
+      ),
+    );
+    _latestRawSample = accepted.last;
+    _rawHistory.addAll(points);
+    if (_recordingRawCsv) _rawRecording.addAll(points);
+    for (final point in points) {
+      _analysisSamples.add(point);
     }
 
-    _pruneRawHistory(point.receivedAt);
+    _pruneRawHistory(receivedAt);
     _scheduleUiRefresh();
+  }
+
+  void _resetRawIngress() {
+    _rawAssembler.reset();
+    _rawTimeline.reset();
+    _streamDiagnostics.reset();
+    _latestRawSample = null;
+    _sessionId++;
+    _analysisSamples.add(null);
+  }
+
+  void _resetIngress() {
+    _connectionEpoch++;
+    _resetRawIngress();
+    _resetAdcIngress();
+    _statusAssembler.reset();
+  }
+
+  void _resetAdcIngress() {
+    _adcAssembler.reset();
+    // AdcHistory owns its timeline. Start a fresh session using the contracted
+    // API, retaining prior points separately until the shared buffer expires.
+    _retainedAdcPoints.addAll(_adcHistory.points);
+    _adcHistory = AdcHistory(maxSamples: _adcHistory.maxSamples);
+    _trimRetainedAdcPoints();
+  }
+
+  void _trimRetainedAdcPoints() {
+    final excess = _retainedAdcPoints.length +
+        _adcHistory.points.length -
+        _adcHistory.maxSamples;
+    if (excess > 0) _retainedAdcPoints.removeRange(0, excess);
   }
 
   DateTime _lastHistoryPrune = DateTime.fromMillisecondsSinceEpoch(0);
@@ -155,15 +226,7 @@ class _BleImuAppState extends State<BleImuApp> {
     _lastHistoryPrune = now;
     final cutoff = now.subtract(_rawHistoryRetention);
 
-    var removeCount = 0;
-    while (removeCount < _rawHistory.length &&
-        _rawHistory[removeCount].receivedAt.isBefore(cutoff)) {
-      removeCount++;
-    }
-
-    if (removeCount > 0) {
-      _rawHistory.removeRange(0, removeCount);
-    }
+    _rawHistory.removeWhere((point) => point.sampledAt.isBefore(cutoff));
   }
 
   String? _pendingDeviceId;
@@ -215,9 +278,11 @@ class _BleImuAppState extends State<BleImuApp> {
   final StreamController<RawImuHistoryPoint?> _analysisSamples =
       StreamController<RawImuHistoryPoint?>.broadcast(sync: true);
   Duration _rawHistoryRetention = const Duration(minutes: 10);
-  final AdcHistory _adcHistory = AdcHistory();
+  AdcHistory _adcHistory = AdcHistory();
+  final List<AdcHistoryPoint> _retainedAdcPoints = [];
   int _invalidAdcPacketCount = 0;
   late final ControlPanelController _controlPanelController;
+  final Map<String, int> _confirmedAdcRates = {};
 
   final Set<RawSensorType> _selectedRawSensors = {
     RawSensorType.accelerometer,
@@ -288,24 +353,39 @@ class _BleImuAppState extends State<BleImuApp> {
     };
 
     void handleCharacteristicValue(BleCharacteristicValue data) {
+      if (!_linkConnected || _disconnecting) return;
       if (!_sameDevice(data.deviceId, _connectedDevice?.deviceId) &&
           !_sameDevice(data.deviceId, _pendingDeviceId)) {
         return;
       }
 
       final characteristic = data.characteristicId.toLowerCase();
+      final now = DateTime.now();
 
-      if (characteristic == BleUuids.rawImuChar.toLowerCase()) {
-        _rawWatchdog.recordActivity(DateTime.now());
-        if (_bleDiagnosticsEnabled) {
-          _streamDiagnostics.record(data.value, DateTime.now());
+      if (characteristic == BleUuids.rawImuChar.toLowerCase() &&
+          _enabledStreams["rawImu"] == true) {
+        _rawWatchdog.recordActivity(now);
+        _handleRawValue(data.value, now, data.deviceId);
+      } else if (characteristic == BleUuids.auxiliaryChar.toLowerCase() &&
+          _enabledStreams["auxiliary"] == true) {
+        final assembly = _adcAssembler.add(data.value, now: now);
+        if (assembly.invalid) {
+          _invalidAdcPacketCount++;
+        } else if (assembly.frame != null) {
+          if (!_adcHistory.addPacket(assembly.frame!, receivedAt: now)) {
+            _invalidAdcPacketCount++;
+          }
+          _trimRetainedAdcPoints();
+        } else {
+          return;
         }
-        _handleRawValue(data.value);
-      } else if (characteristic == BleUuids.auxiliaryChar.toLowerCase()) {
-        if (!_adcHistory.addPacket(data.value)) _invalidAdcPacketCount++;
         _scheduleUiRefresh();
-      } else if (characteristic == BleUuids.statusChar.toLowerCase()) {
-        final status = DeviceStatus.decode(data.value);
+      } else if (characteristic == BleUuids.statusChar.toLowerCase() &&
+          _enabledStreams["status"] == true) {
+        final assembly = _statusAssembler.add(data.value, now: now);
+        final frame = assembly.frame;
+        if (frame == null) return;
+        final status = DeviceStatus.decode(frame);
         if (status != null) {
           _latestStatus = status;
           _scheduleUiRefresh();
@@ -334,7 +414,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
       final wasConnected = _linkConnected;
       _linkConnected = false;
-      if (wasConnected) _analysisSamples.add(null);
+      _resetIngress();
       _stopRawWatchdog();
       if (wasConnected) _subscriptionGate.reset();
       if (_sameDevice(_pendingDeviceId, change.deviceId) &&
@@ -416,8 +496,12 @@ class _BleImuAppState extends State<BleImuApp> {
 
   Future<void> _connect(BleDevice device) async {
     if (_connecting || _disconnecting || _connectedDevice != null) return;
+    final deviceId = device.deviceId;
+    final savedAdcRate = _confirmedAdcRates[_deviceSettingsKey(deviceId)];
     _controlPanelController.restorePendingSelections();
     _controlPanelController.clearLastRateSet();
+    _controlPanelController.requestedAdcRate =
+        savedAdcRate?.toDouble() ?? defaultRequestedAdcRateHz;
     setState(() {
       _isScanning = false;
       _connecting = true;
@@ -432,17 +516,14 @@ class _BleImuAppState extends State<BleImuApp> {
     }
 
     if (!mounted) return;
-    final deviceId = device.deviceId;
-
     _pendingDeviceId = deviceId;
-    _analysisSamples.add(null);
-    _adcHistory.clear();
+    _resetIngress();
+    _latestStatus = null;
     _invalidAdcPacketCount = 0;
     _linkConnected = false;
     _connectionLostDuringSetup = false;
 
     try {
-      if (_bleDiagnosticsEnabled) _streamDiagnostics.reset();
       debugPrint("BLE: connecting to $deviceId");
 
       await UniversalBle.connect(
@@ -478,16 +559,24 @@ class _BleImuAppState extends State<BleImuApp> {
         SetStatusPeriodCommand(_controlPanelController.statusPeriodMs.toInt()),
       ];
       for (final command in setupCommands) {
-        await UniversalBle.write(
-          deviceId,
-          BleUuids.deviceStatusService,
-          BleUuids.controlChar,
-          command.serialize(),
-          timeout: const Duration(seconds: 15),
-        );
+        await _writeControlCommand(deviceId, command);
         _ensureSetupConnected();
         if (command is SetRateCommand) {
           _controlPanelController.markRateRestored(command.rateHz);
+        }
+        await Future<void>.delayed(_gattDelay);
+        _ensureSetupConnected();
+      }
+      if (savedAdcRate != null) {
+        // Only restore a rate previously accepted by this peripheral. A device
+        // that was reflashed with older firmware can still connect and stream.
+        try {
+          await _writeControlCommand(deviceId, SetAdcRateCommand(savedAdcRate));
+          _ensureSetupConnected();
+          _controlPanelController.markAdcRateRestored(savedAdcRate);
+        } catch (error) {
+          _ensureSetupConnected();
+          debugPrint('BLE: ADC rate was not restored: $error');
         }
         await Future<void>.delayed(_gattDelay);
         _ensureSetupConnected();
@@ -527,6 +616,9 @@ class _BleImuAppState extends State<BleImuApp> {
     }
   }
 
+  String _deviceSettingsKey(String deviceId) =>
+      kIsWeb ? deviceId : deviceId.toLowerCase();
+
   bool get _isWindows => defaultTargetPlatform == TargetPlatform.windows;
 
   bool get _isMacChrome =>
@@ -539,6 +631,11 @@ class _BleImuAppState extends State<BleImuApp> {
           : _normalGattDelay;
 
   Future<void> _applyEnabledSubscriptions(String deviceId) async {
+    if (_enabledStreams["rawImu"] == true ||
+        _enabledStreams["auxiliary"] == true) {
+      await _prepareSensorMtu(deviceId);
+      _ensureSetupConnected();
+    }
     // Establish status while the device is not yet sending raw samples.
     if (_enabledStreams["status"] == true) {
       await _subscribe(
@@ -550,8 +647,6 @@ class _BleImuAppState extends State<BleImuApp> {
     }
 
     if (_enabledStreams["auxiliary"] == true) {
-      await _prepareAuxiliaryMtu(deviceId);
-      _ensureSetupConnected();
       await _subscribe(
         deviceId,
         BleUuids.auxiliaryService,
@@ -569,14 +664,16 @@ class _BleImuAppState extends State<BleImuApp> {
     }
   }
 
-  Future<void> _prepareAuxiliaryMtu(String deviceId) async {
+  Future<void> _prepareSensorMtu(String deviceId) async {
     // Android can request an MTU; other platforms negotiate it themselves.
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-      final mtu = await UniversalBle.requestMtu(deviceId, 128,
-          timeout: const Duration(seconds: 15));
-      if (mtu < 25) {
-        throw StateError(
-            "ADC requires BLE MTU 25 or greater (negotiated $mtu)");
+      try {
+        await UniversalBle.requestMtu(deviceId, 247,
+            timeout: const Duration(seconds: 15));
+      } catch (error) {
+        // Negotiation is an optimization: application fragments also support
+        // peers which retain the default MTU or cannot expose an MTU request.
+        debugPrint("BLE: MTU request failed; using negotiated MTU: $error");
       }
     }
   }
@@ -623,6 +720,17 @@ class _BleImuAppState extends State<BleImuApp> {
     final token = _subscriptionGate.begin(key);
     if (token == null) return;
     final previous = _enabledStreams[key]!;
+    switch (key) {
+      case "rawImu":
+        _resetRawIngress();
+        break;
+      case "auxiliary":
+        _resetAdcIngress();
+        break;
+      case "status":
+        _statusAssembler.reset();
+        break;
+    }
 
     setState(() {
       _enabledStreams[key] = enabled;
@@ -630,6 +738,7 @@ class _BleImuAppState extends State<BleImuApp> {
     });
 
     final device = _connectedDevice;
+    final connectionEpoch = _connectionEpoch;
     if (device == null) {
       _subscriptionGate.finish(key, token);
       return;
@@ -657,8 +766,14 @@ class _BleImuAppState extends State<BleImuApp> {
     }
 
     try {
-      if (key == "auxiliary" && enabled) {
-        await _prepareAuxiliaryMtu(device.deviceId);
+      if ((key == "auxiliary" || key == "rawImu") && enabled) {
+        await _prepareSensorMtu(device.deviceId);
+        if (!mounted ||
+            _connectionEpoch != connectionEpoch ||
+            !_linkConnected ||
+            !_sameDevice(device.deviceId, _connectedDevice?.deviceId)) {
+          return;
+        }
       }
       await _setSubscription(
           device.deviceId, serviceUuid, characteristicUuid, enabled);
@@ -712,11 +827,10 @@ class _BleImuAppState extends State<BleImuApp> {
       setState(() {
         _connectedDevice = null;
         _linkConnected = false;
-        _analysisSamples.add(null);
+        _resetIngress();
         _subscriptionGate.reset();
         _latestRawSample = null;
         _latestStatus = null;
-        _rawRecording.clear();
         _recordingRawCsv = false;
       });
     } catch (error) {
@@ -757,28 +871,44 @@ class _BleImuAppState extends State<BleImuApp> {
     super.dispose();
   }
 
+  Future<void> _writeControlCommand(
+          String deviceId, BleControlCommand command) =>
+      UniversalBle.write(
+        deviceId,
+        BleUuids.deviceStatusService,
+        BleUuids.controlChar,
+        command.serialize(),
+        timeout: const Duration(seconds: 15),
+      );
+
   Future<void> _sendCommand(BleControlCommand cmd) async {
-    if (_connectedDevice == null) throw Exception("Device not connected");
-    final payload = cmd.serialize();
-    final deviceId = _connectedDevice!.deviceId;
-    await UniversalBle.write(
-      deviceId,
-      BleUuids.deviceStatusService,
-      BleUuids.controlChar,
-      payload,
-      timeout: const Duration(seconds: 15),
-    );
+    final deviceId = _connectedDevice?.deviceId;
+    if (deviceId == null || !_linkConnected) {
+      throw StateError('Device not connected');
+    }
+    final connectionEpoch = _connectionEpoch;
+    try {
+      await _writeControlCommand(deviceId, cmd);
+    } catch (error) {
+      if (cmd is SetAdcRateCommand) {
+        throw StateError('Could not set ADC rate. This control requires '
+            'firmware 1.4.1 or later with AUX ADC enabled. $error');
+      }
+      rethrow;
+    }
+    if (cmd is SetAdcRateCommand) {
+      if (!mounted || _connectionEpoch != connectionEpoch || !_linkConnected) {
+        throw StateError('Device disconnected while setting ADC rate');
+      }
+      _confirmedAdcRates[_deviceSettingsKey(deviceId)] = cmd.rateHz;
+    }
     // Firmware changes the rate when slow mode is toggled. Restore the chosen
     // rate so the slider and device continue to agree.
     if (cmd is SetSlowModeCommand) {
       try {
-        await UniversalBle.write(
+        await _writeControlCommand(
           deviceId,
-          BleUuids.deviceStatusService,
-          BleUuids.controlChar,
-          SetRateCommand(_controlPanelController.requestedRate.toInt())
-              .serialize(),
-          timeout: const Duration(seconds: 15),
+          SetRateCommand(_controlPanelController.requestedRate.toInt()),
         );
       } catch (error) {
         throw SlowModeRateWriteException(error);
@@ -955,6 +1085,7 @@ class _BleImuAppState extends State<BleImuApp> {
             Text("BLE notification rate: ${status.notificationRate} Hz"),
             Text("Uptime: ${(status.uptimeMs / 1000).toStringAsFixed(1)} s"),
             Text("Dropped notifications: ${status.droppedNotifications}"),
+            Text("Discarded sensor samples: ${status.bufferDroppedSamples}"),
             Text("FIFO / I2C recoveries: ${status.fifoRecoveries}"),
           ],
         ),
@@ -1039,7 +1170,7 @@ class _BleImuAppState extends State<BleImuApp> {
             fontSize: 11,
           ),
         ),
-        if (raw.version == 1) ...[
+        if (raw.version != 2) ...[
           const SizedBox(height: 10),
           const Text(
             "Magnetometer",
@@ -1302,9 +1433,6 @@ class _BleImuAppState extends State<BleImuApp> {
     return _SectionCard(children: [
       if (!_enabledStreams["auxiliary"]!)
         const Text("Enable Auxiliary sensor above to receive ADC data."),
-      if (_enabledStreams["auxiliary"]! && _adcHistory.isEmpty)
-        const Text(
-            "ADC notifications require a negotiated BLE MTU of at least 25."),
       Wrap(
         spacing: 8,
         crossAxisAlignment: WrapCrossAlignment.center,
@@ -1319,14 +1447,17 @@ class _BleImuAppState extends State<BleImuApp> {
               DropdownMenuItem(value: 120000, child: Text("120,000 samples")),
             ],
             onChanged: (value) {
-              if (value != null) setState(() => _adcHistory.maxSamples = value);
+              if (value == null) return;
+              setState(() {
+                _adcHistory.maxSamples = value;
+                _trimRetainedAdcPoints();
+              });
             },
           ),
         ],
       ),
       AdcChart(
-        history:
-            _adcHistory.pointsSince(DateTime.now().subtract(_rawChartPeriod)),
+        history: [..._retainedAdcPoints, ..._adcHistory.points],
         visiblePeriod: _rawChartPeriod,
       ),
       if (_invalidAdcPacketCount > 0)
@@ -1399,7 +1530,8 @@ class _BleImuAppState extends State<BleImuApp> {
         "gyro_x_count,gyro_y_count,gyro_z_count,"
         "gyro_x_dps,gyro_y_dps,gyro_z_dps,"
         "mag_x_count,mag_y_count,mag_z_count,"
-        "temperature_count,measured_rate_hz",
+        "temperature_count,measured_rate_hz,"
+        "device_id,session_id,glove_slot,sample_iso8601",
       );
 
     for (final entry in samples) {
@@ -1433,7 +1565,11 @@ class _BleImuAppState extends State<BleImuApp> {
         sample.magnetometerZ ?? "",
         sample.temperature ?? "",
         sample.measuredRateHz ?? "",
-      ].join(","));
+        entry.deviceId ?? "",
+        entry.sessionId,
+        sample.gloveId,
+        entry.sampledAt.toUtc().toIso8601String(),
+      ].map(_csvCell).join(","));
     }
 
     final timestamp = startedAt
@@ -1443,6 +1579,11 @@ class _BleImuAppState extends State<BleImuApp> {
         .replaceAll(".", "-");
 
     try {
+      final save = widget.saveCsv;
+      if (save != null) {
+        await save(csv.toString(), startedAt, prefix);
+        return;
+      }
       final bytes = Uint8List.fromList(utf8.encode(csv.toString()));
       if (kIsWeb) {
         await FileSaver.instance.saveFile(
@@ -1466,6 +1607,16 @@ class _BleImuAppState extends State<BleImuApp> {
         );
       }
     }
+  }
+
+  String _csvCell(Object value) {
+    final text = value.toString();
+    return text.contains(',') ||
+            text.contains('"') ||
+            text.contains('\r') ||
+            text.contains('\n')
+        ? '"${text.replaceAll('"', '""')}"'
+        : text;
   }
 
   void _cancelRawCsvRecording() {

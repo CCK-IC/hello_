@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/protocol.dart';
 
 const double defaultRequestedRateHz = 45;
+const double defaultRequestedAdcRateHz = 100;
 
 /// The slow-mode write succeeded, but restoring the selected rate failed.
 /// Throw only after the first write completes successfully.
@@ -41,6 +42,9 @@ class ControlPanelController extends ChangeNotifier {
   bool _disposed = false;
   bool _rateUnconfirmed = false;
   int? _lastRateSetByApp;
+  double _requestedAdcRate = defaultRequestedAdcRateHz;
+  double _savedAdcRate = defaultRequestedAdcRateHz;
+  int? _lastAdcRateSetByApp;
   int _connectionGeneration = 0;
 
   /// Last rate successfully sent on the current connection.
@@ -49,8 +53,9 @@ class ControlPanelController extends ChangeNotifier {
   /// Start tracking a new connection without changing the user selections.
   void clearLastRateSet() {
     _connectionGeneration++;
-    if (_lastRateSetByApp == null) return;
+    if (_lastRateSetByApp == null && _lastAdcRateSetByApp == null) return;
     _lastRateSetByApp = null;
+    _lastAdcRateSetByApp = null;
     notifyListeners();
   }
 
@@ -87,6 +92,27 @@ class ControlPanelController extends ChangeNotifier {
     notifyListeners();
   }
 
+  int? get lastAdcRateSetByApp => _lastAdcRateSetByApp;
+
+  void markAdcRateRestored(int rateHz) {
+    if (_lastAdcRateSetByApp == rateHz) return;
+    _lastAdcRateSetByApp = rateHz;
+    notifyListeners();
+  }
+
+  double get requestedAdcRate => _requestedAdcRate;
+  set requestedAdcRate(double value) {
+    assert(value >= 1 && value <= 200);
+    _savedAdcRate = value;
+    _previewAdcRate(value);
+  }
+
+  void _previewAdcRate(double value) {
+    if (_requestedAdcRate == value) return;
+    _requestedAdcRate = value;
+    notifyListeners();
+  }
+
   double get statusPeriodMs => _statusPeriodMs;
   set statusPeriodMs(double value) {
     assert(value >= 250 && value <= 5000);
@@ -115,6 +141,7 @@ class ControlPanelController extends ChangeNotifier {
   /// Discard unfinished gestures before restoring settings on a new link.
   void restorePendingSelections() {
     _previewRate(_savedRate);
+    _previewAdcRate(_savedAdcRate);
     _previewStatusPeriod(_savedStatusPeriodMs);
     _previewSlowMode(_savedSlowMode);
   }
@@ -193,6 +220,9 @@ class _ControlPanelState extends State<ControlPanel> {
     if (cmd is! SetRateCommand) {
       _controller._previewRate(_controller._savedRate);
     }
+    if (cmd is! SetAdcRateCommand) {
+      _controller._previewAdcRate(_controller._savedAdcRate);
+    }
     if (cmd is! SetStatusPeriodCommand) {
       _controller._previewStatusPeriod(_controller._savedStatusPeriodMs);
     }
@@ -207,6 +237,8 @@ class _ControlPanelState extends State<ControlPanel> {
         onComplete?.call(null);
         if (cmd is SetRateCommand) {
           controller.markRateRestored(cmd.rateHz);
+        } else if (cmd is SetAdcRateCommand) {
+          controller.markAdcRateRestored(cmd.rateHz);
         } else if (cmd is SetSlowModeCommand) {
           controller.markRateRestored(restoredRate);
         }
@@ -249,6 +281,19 @@ class _ControlPanelState extends State<ControlPanel> {
     });
   }
 
+  void _commitAdcRate(double value) {
+    final controller = _controller;
+    final rateHz = value.toInt();
+    _send(SetAdcRateCommand(rateHz), onComplete: (error) {
+      if (controller.requestedAdcRate != value) return;
+      if (error == null) {
+        controller.requestedAdcRate = rateHz.toDouble();
+      } else {
+        controller._previewAdcRate(controller._savedAdcRate);
+      }
+    });
+  }
+
   void _commitStatusPeriod(double value) {
     final controller = _controller;
     final periodMs = value.toInt();
@@ -260,6 +305,33 @@ class _ControlPanelState extends State<ControlPanel> {
         controller._previewStatusPeriod(controller._savedStatusPeriodMs);
       }
     });
+  }
+
+  Widget _buildAdcRateControl(BuildContext context) {
+    final theme = Theme.of(context);
+    final lastRate = _controller.lastAdcRateSetByApp;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSlider(
+          label: 'ADC Sample Rate',
+          unit: 'Hz',
+          spokenUnit: 'hertz',
+          min: 1,
+          max: 200,
+          value: _controller.requestedAdcRate,
+          onPreview: _controller._previewAdcRate,
+          onCommit: _commitAdcRate,
+        ),
+        Text(
+          lastRate == null
+              ? 'ADC rate has not been set by this app'
+              : 'Last ADC rate set by app: $lastRate Hz',
+          style: theme.textTheme.bodyMedium
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+      ],
+    );
   }
 
   void _setSlowMode(bool value) {
@@ -352,7 +424,7 @@ class _ControlPanelState extends State<ControlPanel> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _buildSlider(
-          label: 'Notification Stream Rate',
+          label: 'IMU Sample Rate',
           unit: 'Hz',
           spokenUnit: 'hertz',
           min: 1,
@@ -436,6 +508,10 @@ class _ControlPanelState extends State<ControlPanel> {
                         onPreview: _controller._previewStatusPeriod,
                         onCommit: _commitStatusPeriod,
                       ),
+                    ),
+                    SizedBox(
+                      width: sliderWidth,
+                      child: _buildAdcRateControl(context),
                     ),
                   ],
                 );

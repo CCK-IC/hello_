@@ -1,10 +1,89 @@
 # BLE project handoff
 
-Last updated: 2026-10-30. Update this file after each meaningful test or change,
+Last updated: 2026-11-20. Update this file after each meaningful test or change,
 including the result, relevant commit, and remaining work. Share the updated
 file through the repository's normal Git workflow so other checkouts receive it.
 
 The app and sensor firmware are separate repositories. Mac and Windows also use separate checkouts: verify each checkout's repository, branch, commits, and local changes before transferring work. A commit in one checkout does not automatically update another.
+
+## Stable V3 publication, 2026-11-20
+
+- App version **1.1.0+2**, branch `codex/stable-v3-fw-v1.4.1`.
+  Companion firmware release **1.4.1**, branch `codex/v1.4.1`, release commit
+  `67b2436`. That firmware commit already includes the fixed-slot v3 batches.
+- The app includes the independent ADC sample-rate control (`0x08`, 1–200 Hz),
+  enabled for firmware 1.4.1 or later with AUX available. It retains the selected
+  rate across rebuilds and restores it on reconnect. IMU rate remains independent.
+- A cross-repository check found matching v3 layouts, flags, deltas, status and
+  fragment encoding. Status firmware versions are decoded dynamically; the
+  original 1.4.0 golden fixture remains a valid compatibility test.
+- Original board results below apply to firmware 1.4.0 on 2026-11-16. This
+  publication does not add a new hardware test or change the platform limitations.
+- Publication checks on 2026-11-20: **112 Flutter tests passed** and
+  `flutter analyze --no-pub` reported no issues.
+- The existing local `pubspec.lock` edits are excluded from this release commit.
+
+## Batched protocol v3 release documentation, 2026-11-16
+
+- Release versions: firmware **1.4.0**, app **1.1.0+2**. Production C firmware
+  working tree: `/Users/kt/Github_IC/Glove_Firmware`, on
+  the original `codex/batched-sensor-packets-v1.4.0` development branches.
+  Current publication branches are listed above. The
+  authoritative wire contract is [docs/BATCH_PROTOCOL_V3.md](docs/BATCH_PROTOCOL_V3.md).
+- Every v3 raw/quaternion/AUX sensor frame and status snapshot physically
+  carries two fixed-width slots. Only local slot 0 is present (`0x01` mask);
+  all absent slot 1 metadata and sample/status payload bytes are zero-filled.
+  Reserved space consumes actual bandwidth. There is no second-glove discovery,
+  pairing, relay, or synchronization implementation.
+- App compatibility retains raw/status v1/v2 and AUX v1 alongside v3. All
+  accepted local batch samples expand into history/charts; raw samples also
+  feed analysis and each receive their own CSV row. Glove IDs are retained;
+  absent slots do not generate samples or enter local analysis.
+- Raw CSV appends `device_id`, `session_id`, `glove_slot`, `sample_iso8601` to
+  existing columns. Callback arrival (`received_iso8601` and `elapsed_ms`) stays
+  separate from sample time derived from original device timestamp deltas.
+  Charts preserve sample spacing within batches. A fragmented frame's arrival
+  is its completing callback; derived sample time is not synchronized acquisition
+  wall time. Retained raw history keeps device/session provenance across reconnects.
+- Preferred ATT MTU 247 fits four raw rows in 220 bytes, including reserved
+  slot bytes. Android requests 247; other platforms negotiate independently.
+  If a single row cannot fit, ordered `0xF3` fragments retain the complete frame
+  layout. App reassembly is bounded to one frame per stream, at most 512 bytes,
+  with a one-second expiry; invalid/incomplete frames emit no samples. Reset
+  reassembly at disconnect/unsubscribe/new fragment 0.
+- Firmware uses 64-sample queues per stream, an 80 ms maximum batch flush wait,
+  and bounded retry of the same prepared frame/fragment on transient enqueue
+  failure; pending batches expire after 500 ms. Overflow discards oldest unread
+  samples with counters. Connection/subscription boundaries clear pending data.
+  Sampling Hz and notification packet Hz are separate: command `01` requests
+  IMU acquisition rate; the app labels this control **IMU Sample Rate**.
+- Verification: all **110 Flutter tests** pass; static analysis is clean and
+  the web release builds. Production C codec, queue, sender, ADC and raw/DMP
+  magnetometer suites pass ASan/UBSan; all ten firmware syntax variants pass.
+  C-generated packet fixtures decode identically in Dart, including MTU23
+  fragment reassembly. Native sender tests reproduce and prevent MTU/expiry
+  completion races; queue tests prevent mixed measured-rate batch rejection.
+- Final raw image was flashed to `XIAO-IMU-RAW-75F2` (XIAO ESP32-C3). A macOS
+  CoreBluetooth/Bleak run negotiated MTU247 and requested 45/90/200/45 Hz for
+  15 seconds each. It received **3,632 raw samples / 963 notifications** and
+  **5,870 dummy ADC samples / 1,174 notifications**, plus status snapshots.
+  There were no sequence gaps, malformed frames, disconnections, magnetic
+  invalidity/overflow, or increments in notification/sample/FIFO/I2C loss
+  counters. Physical acquisition remained below requested 200 Hz; this is
+  reported separately from packet rate, rather than hidden by batching.
+- Unsubscribe/resubscribe and reconnect checks passed with fresh samples and
+  no stale replay. Standard battery reads remain one byte. Second-slot metadata
+  and payload and inactive ADC channels were zero in every checked frame.
+- Validation details and limits: [docs/VALIDATION_V3.md](docs/VALIDATION_V3.md).
+  Firmware stores the exact counters and flashed binary SHA256 in
+  `tests/hardware/batch_v3_1.4.0_2026-11-16.json`. AUX was a dummy source, not
+  electrical input. These hardware checks used a Bleak harness, not Flutter UI.
+- macOS release compilation is blocked in Flutter/Xcode framework architecture
+  verification (`lipo`); Windows, Android, iOS and Linux builds/hardware were
+  not verified for this release. Physical DMP and hardware MTU23 links remain
+  untested. Earlier native crashes/Windows radio issues are not declared fixed.
+  The app's existing `pubspec.lock` edits were preserved. These validation
+  notes describe the original working changes; publication is recorded above.
 
 ## Known work
 

@@ -37,10 +37,15 @@ void main() {
     final commands = <BleControlCommand>[];
     await showPanel(tester, commands);
 
-    final sliders = find.byType(Slider);
-    final rate = tester.getSemantics(sliders.first);
-    final period = tester.getSemantics(sliders.last);
-    expect(rate.label, 'Notification Stream Rate');
+    Finder slider(String label) => find.byWidgetPredicate(
+          (widget) => widget is Slider && widget.label == label,
+        );
+    final imuSlider = slider('IMU Sample Rate');
+    final statusSlider = slider('Status Update Period');
+    final adcSlider = slider('ADC Sample Rate');
+    final rate = tester.getSemantics(imuSlider);
+    final period = tester.getSemantics(statusSlider);
+    expect(rate.label, 'IMU Sample Rate');
     expect(rate.value, '45 hertz');
     expect(rate.getSemanticsData().flagsCollection.isSlider, isTrue);
     expect(rate.getSemanticsData().hasAction(SemanticsAction.increase), isTrue);
@@ -53,15 +58,23 @@ void main() {
     await tester.pump();
     final sentRate = (commands.single as SetRateCommand).rateHz;
     expect(sentRate, greaterThan(45));
-    expect(tester.getSemantics(sliders.first).value, '$sentRate hertz');
+    expect(tester.getSemantics(imuSlider).value, '$sentRate hertz');
 
-    final updatedPeriod = tester.getSemantics(sliders.last);
+    final updatedPeriod = tester.getSemantics(statusSlider);
     updatedPeriod.owner!
         .performAction(updatedPeriod.id, SemanticsAction.decrease);
     await tester.pump();
     final sentPeriod = (commands.last as SetStatusPeriodCommand).periodMs;
     expect(sentPeriod, lessThan(1000));
-    expect(tester.getSemantics(sliders.last).value, '$sentPeriod milliseconds');
+    expect(tester.getSemantics(statusSlider).value, '$sentPeriod milliseconds');
+
+    final adc = tester.getSemantics(adcSlider);
+    expect(adc.value, '100 hertz');
+    adc.owner!.performAction(adc.id, SemanticsAction.decrease);
+    await tester.pump();
+    final sentAdcRate = (commands.last as SetAdcRateCommand).rateHz;
+    expect(sentAdcRate, lessThan(100));
+    expect(tester.getSemantics(adcSlider).value, '$sentAdcRate hertz');
 
     final slowMode = tester.getSemantics(find.byType(Switch));
     expect(slowMode.label, 'Slow/Debug Mode (0x04)');
@@ -76,7 +89,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetPhysicalSize);
     final commands = <BleControlCommand>[];
-    final rate = find.text('Notification Stream Rate: 45 Hz');
+    final rate = find.text('IMU Sample Rate: 45 Hz');
     final period = find.text('Status Update Period: 1000 ms');
 
     await showPanel(tester, commands);
