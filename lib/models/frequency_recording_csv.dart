@@ -1,4 +1,5 @@
 import 'frequency_history.dart';
+import 'imu_frequency_analysis.dart';
 
 /// Serialize frequency-analysis snapshots as one row per configured band.
 ///
@@ -15,25 +16,33 @@ String frequencyRecordingCsv(
         'band,band_min_hz,band_max_hz,candidate_peak_hz,unavailable_reason');
 
   for (final point in points) {
-    final analysis = point.analysis;
-    final bands = analysis.bands.isEmpty ? [null] : analysis.bands;
-    for (final band in bands) {
-      final values = <Object?>[
-        point.timestamp.toUtc().toIso8601String(),
-        point.timestamp.difference(startedAt).inMicroseconds / 1000.0,
-        point.sensor.name,
-        analysis.duration.inMilliseconds,
-        analysis.sampleCount,
-        analysis.sampleRateHz,
-        analysis.nyquistHz,
-        analysis.error,
-        band?.band.label,
-        band?.band.minHz,
-        band?.band.maxHz,
-        band?.peakHz,
-        band?.unavailableReason ?? analysis.error,
-      ];
-      output.writeln(values.map(_csvCell).join(','));
+    final adcName = 'adc_ch_${point.adcChannel + 1}';
+    final sources = <String, ImuFrequencyAnalysis>{
+      point.sensor.name: point.analysis,
+      if (point.adc case final adc?) adcName: adc,
+      if (point.fused case final fused?)
+        'fused_${point.sensor.name}_$adcName': fused,
+    };
+    for (final MapEntry(key: source, value: analysis) in sources.entries) {
+      final bands = analysis.bands.isEmpty ? [null] : analysis.bands;
+      for (final band in bands) {
+        final values = <Object?>[
+          point.timestamp.toUtc().toIso8601String(),
+          point.timestamp.difference(startedAt).inMicroseconds / 1000.0,
+          source,
+          analysis.duration.inMilliseconds,
+          analysis.sampleCount,
+          analysis.sampleRateHz,
+          analysis.nyquistHz,
+          analysis.error,
+          band?.band.label,
+          band?.band.minHz,
+          band?.band.maxHz,
+          band?.peakHz,
+          band?.unavailableReason ?? analysis.error,
+        ];
+        output.writeln(values.map(_csvCell).join(','));
+      }
     }
   }
   return output.toString();

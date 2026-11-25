@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:ble_imu_visualizer/models/adc_history.dart';
 import 'package:ble_imu_visualizer/models/protocol.dart';
 import 'package:ble_imu_visualizer/models/raw_imu_history.dart';
 import 'package:ble_imu_visualizer/widgets/imu_analysis_page.dart';
@@ -267,6 +268,7 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(320, 700));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final samples = StreamController<RawImuHistoryPoint?>(sync: true);
+    final adcSamples = StreamController<AdcHistoryPoint?>(sync: true);
     await tester.pumpWidget(MaterialApp(
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0D6F73)),
@@ -276,7 +278,8 @@ void main() {
             .copyWith(textScaler: const TextScaler.linear(2)),
         child: child!,
       ),
-      home: ImuAnalysisPage(samples: samples.stream),
+      home: ImuAnalysisPage(
+          samples: samples.stream, adcSamples: adcSamples.stream),
     ));
     final pageScroll = find
         .descendant(
@@ -294,6 +297,7 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
     unawaited(samples.close());
+    unawaited(adcSamples.close());
   });
 
   testWidgets('duration controls announce their names, values and actions',

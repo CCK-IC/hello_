@@ -17,6 +17,9 @@ frequency analysis and CSV recording/export. See the authoritative
 Hardware verification of this release is pending; batching and bounded retries
 do not establish that the previously observed disconnects are fixed.
 
+App **1.1.1+3** adds ADC percussion and synchronized ADC + IMU frequency
+analysis, with live results, history plots, and frequency CSV export.
+
 ## Run the app
 
 You need a BLE-capable host and a powered sensor running firmware that implements
@@ -86,19 +89,31 @@ screen-reader labels.
 
 ## Analyze motion
 
-1. Keep **IMU raw** enabled and open **Analyze IMU data** from the app bar.
-2. Select **Acceleration** or **Angular velocity** and collect several seconds of
-   steady motion. The app estimates a candidate peak for each band using up to
-   eight seconds of recent samples and reports the observed sample rate and
-   Nyquist limit.
+1. Enable **IMU raw** for motion estimates and **Auxiliary sensor** in **BLE
+   subscriptions** for ADC and fused estimates. Open **Analyze IMU data** from
+   the app bar.
+2. Select **Acceleration** or **Angular velocity** and choose the **ADC analysis
+   channel** for your sensor input. Collect several seconds of movement. ADC and
+   fused results use the same configured bands as the original IMU results.
 3. Adjust the ranges under **Frequency bands** and select **Apply bands**. The
    defaults are **1–5 Hz** for percussion and **6.5–10 Hz** for vibration.
-4. Use **Frequency history** to show either or both bands. Set a display window
-   from 10 seconds to 5 minutes and a history buffer from 1 to 60 minutes.
+4. Use **Frequency history** to show any of the five series. Set a display
+   window from 10 seconds to 5 minutes and a history buffer from 1 to 60 minutes.
+
+**ADC percussion** reports the typical rate between detected taps within the
+percussion band. Tap spacing can vary, and pauses longer than the band allows
+are left out. For noisy ADC signals, the app smooths short fluctuations and
+waits for a release before counting another tap. **Fused percussion** estimates
+cadence from ADC taps that match IMU impacts, allowing a consistent short lead
+or lag. **Fused vibration**
+searches the IMU spectrum during sustained ADC highs and tolerates brief dips.
+The automatic gate uses a recent low ADC reading as a reference. If the ADC is
+already high, open **Vibration gate** and set a minimum ADC count for the
+selected channel. Both fused estimates use the glove's device clock.
 
 History records at most one new estimate per second when fresh samples arrive
 and retains up to 3,600 estimates. The chart leaves gaps when estimates are
-unavailable or when the selected signal or band settings change. Candidate
+unavailable or when the inputs or band settings change. Candidate
 peaks describe periodic motion in the selected signal and are not a clinical
 assessment.
 
@@ -128,9 +143,10 @@ wall-clock measurement of acquisition time.
 The raw history can retain samples across connections, so use a timed recording
 for a separate file per sensor. Keep the sensor connected until it finishes.
 
-Frequency CSV contains one row per estimate and band, with the selected signal,
-band bounds, sample rate, candidate peak, and the reason when a peak is
-unavailable. Save the frequency history before leaving the analysis page or
+Frequency CSV contains one row per estimate, source, and band, with band bounds,
+sample rate, candidate peak, and the reason when a peak is unavailable. The
+`sensor` column identifies the source, for example `accelerometer`, `adc_ch_1`,
+or `fused_accelerometer_adc_ch_1`. Save the history before leaving the analysis page or
 disconnecting. If a connection ends during a frequency recording, select
 **Save recording CSV** on that page to save the partial recording.
 

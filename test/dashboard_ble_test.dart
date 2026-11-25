@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:ble_imu_visualizer/main.dart';
 import 'package:ble_imu_visualizer/models/protocol.dart';
 import 'package:ble_imu_visualizer/widgets/adc_chart.dart';
+import 'package:ble_imu_visualizer/widgets/frequency_history_chart.dart';
 import 'package:ble_imu_visualizer/widgets/raw_imu_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -404,7 +405,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('Observed sample rate: 25.0 Hz'), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('Candidate spectral peaks'), 300,
+    await tester.scrollUntilVisible(find.text('Frequency estimates'), 300,
         scrollable: find.byType(Scrollable).last);
     expect(find.text('1.99 Hz'), findsOneWidget);
     ble.updateConnection(_deviceId, false);
@@ -694,32 +695,123 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('frequency analysis receives every local row of v3 batches',
+  testWidgets('analysis uses local IMU and ADC rows from v3 BLE batches',
       (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1200, 1600));
+    await tester.binding.setSurfaceSize(const Size(1200, 2000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final ble = _FakeBlePlatform();
     await _connectDashboard(tester, ble);
+    await _toggle(tester, 'Auxiliary sensor');
     await tester.tap(find.byTooltip('Analyze IMU data'));
     await tester.pumpAndSettle();
-    for (var base = 0; base < 151; base += 8) {
-      final count = math.min(8, 151 - base);
-      final frame = _batch(1, List.generate(count, (i) => i * 40),
-          sequence: base, timestamp: base * 40, peer: true);
-      final data = ByteData.sublistView(frame);
-      for (var i = 0; i < count; i++) {
-        data.setInt16(
-            28 + i * 48 + 4,
-            (1000 * math.sin(2 * math.pi * 2 * (base + i) / 25)).round(),
-            Endian.little);
-      }
-      _emit(ble, BleUuids.rawImuChar, frame);
+    int impact(int timeMs) {
+      final distance = (timeMs % 500 - 200) / 40;
+      return (3000 * math.exp(-distance * distance / 2)).round();
     }
+
+    void emitSignal(int kind, int start, int end, int periodMs,
+        int Function(int timeMs) signal) {
+      for (var base = start; base < end; base += 8) {
+        final count = math.min(8, end - base);
+        final frame = _batch(kind, List.generate(count, (i) => i * periodMs),
+            sequence: base, timestamp: base * periodMs, peer: true);
+        final data = ByteData.sublistView(frame);
+        for (var i = 0; i < count; i++) {
+          final value = signal((base + i) * periodMs);
+          if (kind == 1) {
+            final offset = 28 + i * 48 + 4;
+            data.setInt16(offset, value, Endian.little);
+            data.setInt16(offset + 2, 0, Endian.little);
+            data.setInt16(offset + 4, 16384, Endian.little);
+          } else {
+            final offset = 28 + i * 40 + 4;
+            data.setInt16(offset, 500, Endian.little);
+            data.setInt16(offset + 2, value, Endian.little);
+          }
+        }
+        _emit(ble, kind == 1 ? BleUuids.rawImuChar : BleUuids.auxiliaryChar,
+            frame);
+      }
+    }
+
+    emitSignal(1, 0, 151, 40, impact);
+    emitSignal(3, 0, 601, 10, (timeMs) => 500 + impact(timeMs));
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('Observed sample rate: 25.0 Hz'), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('Candidate spectral peaks'), 300,
+    final adc = find.byKey(const ValueKey('frequency-result-adcPercussion'));
+    final fused =
+        find.byKey(const ValueKey('frequency-result-fusedPercussion'));
+    Finder peakIn(Finder card) =>
+        find.descendant(of: card, matching: find.text('2.00 Hz'));
+    expect(peakIn(adc), findsNothing); // The default input is flat.
+    expect(peakIn(fused), findsNothing);
+    await tester.ensureVisible(find.text('Channel 1'));
+    await tester.tap(find.text('Channel 1'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Channel 2').last);
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 1));
+    expect(peakIn(adc), findsOneWidget);
+    expect(peakIn(fused), findsOneWidget);
+    final chart = find.byType(FrequencyHistoryChart);
+    await tester.scrollUntilVisible(chart, 300,
         scrollable: find.byType(Scrollable).last);
-    expect(find.text('1.99 Hz'), findsOneWidget);
+    final plot = tester.widget<FrequencyHistoryChart>(chart);
+    expect(plot.selected, containsAll(FrequencySeries.values));
+    for (final series in [
+      FrequencySeries.adcPercussion,
+      FrequencySeries.fusedPercussion
+    ]) {
+      final segments = frequencyPlotSegments(plot.history, series);
+      expect(series.result(segments.single.single)?.peakHz, closeTo(2, 0.05));
+      expect(segments.single.single.adcChannel, 1);
+    }
+    // A different window has one sustained high and an 8 Hz IMU signal.
+    // Keep acquisition continuous while advancing the device clock.
+    emitSignal(3, 601, 1841, 10, (timeMs) => timeMs < 12000 ? 500 : 2500);
+    emitSignal(
+        1,
+        151,
+        461,
+        40,
+        (timeMs) => timeMs < 12000
+            ? 0
+            : (2000 * math.sin(2 * math.pi * 8 * timeMs / 1000)).round());
+    await tester.pump(const Duration(seconds: 1));
+    final latestPlot = tester.widget<FrequencyHistoryChart>(chart);
+    const vibration = FrequencySeries.fusedVibration;
+    final vibrationSegments =
+        frequencyPlotSegments(latestPlot.history, vibration);
+    final vibrationHz =
+        vibration.result(vibrationSegments.single.single)!.peakHz!;
+    expect(vibrationHz, closeTo(8, 0.15));
+    final fusedVibration =
+        find.byKey(const ValueKey('frequency-result-fusedVibration'));
+    final vibrationReadout = find.descendant(
+      of: fusedVibration,
+      matching: find.text('${vibrationHz.toStringAsFixed(2)} Hz'),
+    );
+    expect(vibrationReadout, findsOneWidget);
+
+    Future<void> setGate(String current, String value) async {
+      final gate = find.text(current);
+      await tester.ensureVisible(gate);
+      await tester.tap(gate);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+          find.widgetWithText(TextFormField, 'ADC high threshold (counts)'),
+          value);
+      await tester.tap(find.text('Apply gate'));
+      await tester.pumpAndSettle();
+    }
+
+    await setGate('Vibration gate: Automatic', '2600');
+    expect(vibrationReadout, findsNothing);
+    await setGate('Vibration gate: ≥ 2600 counts', '1500');
+    expect(vibrationReadout, findsOneWidget);
+    ble.updateConnection(_deviceId, false);
+    await tester.pump();
+    expect(tester.widget<FrequencyHistoryChart>(chart).history, isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
     expect(tester.takeException(), isNull);
   });

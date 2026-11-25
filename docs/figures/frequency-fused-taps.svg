@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 290" role="img" aria-labelledby="title desc">
+  <title id="title">One-to-one fusion of ADC taps and IMU impacts</title>
+  <desc id="desc">Four ADC taps are paired with four slightly later IMU impacts on a shared time axis. A fifth IMU impact has no corresponding ADC tap and remains unmatched.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3.5" orient="auto-start-reverse" viewBox="0 0 8 7"><path d="M0 0L7 3.5L0 7Z" fill="#425C72"/></marker>
+  </defs>
+  <rect x="1" y="1" width="898" height="288" rx="16" fill="#fff" stroke="#D8E4EB" stroke-width="2"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#122640">
+    <text x="24" y="47" font-size="18" font-weight="700" fill="#087D77" text-anchor="start">ADC taps</text>
+<text x="24" y="167" font-size="18" font-weight="700" fill="#2658A5" text-anchor="start">IMU impacts</text>
+<text x="876" y="39" font-size="18" font-weight="400" fill="#425C72" text-anchor="end">Shared device clock</text>
+<path d="M152 91L864 91" stroke="#D8E4EB" stroke-width="2" fill="none"/>
+<path d="M152 193L864 193" stroke="#D8E4EB" stroke-width="2" fill="none"/>
+<path d="M218 91L243 193" stroke="#425C72" stroke-width="2" fill="none" stroke-dasharray="7 5"/>
+<path d="M218 91L218 66" stroke="#087D77" stroke-width="4" fill="none"/>
+<circle cx="218" cy="66" r="6" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M243 193L243 167" stroke="#2658A5" stroke-width="4" fill="none"/>
+<circle cx="243" cy="167" r="6" fill="#2658A5" stroke="none" stroke-width="1"/>
+<path d="M386 91L412 193" stroke="#425C72" stroke-width="2" fill="none" stroke-dasharray="7 5"/>
+<path d="M386 91L386 66" stroke="#087D77" stroke-width="4" fill="none"/>
+<circle cx="386" cy="66" r="6" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M412 193L412 167" stroke="#2658A5" stroke-width="4" fill="none"/>
+<circle cx="412" cy="167" r="6" fill="#2658A5" stroke="none" stroke-width="1"/>
+<path d="M586 91L610 193" stroke="#425C72" stroke-width="2" fill="none" stroke-dasharray="7 5"/>
+<path d="M586 91L586 66" stroke="#087D77" stroke-width="4" fill="none"/>
+<circle cx="586" cy="66" r="6" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M610 193L610 167" stroke="#2658A5" stroke-width="4" fill="none"/>
+<circle cx="610" cy="167" r="6" fill="#2658A5" stroke="none" stroke-width="1"/>
+<path d="M750 91L775 193" stroke="#425C72" stroke-width="2" fill="none" stroke-dasharray="7 5"/>
+<path d="M750 91L750 66" stroke="#087D77" stroke-width="4" fill="none"/>
+<circle cx="750" cy="66" r="6" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M775 193L775 167" stroke="#2658A5" stroke-width="4" fill="none"/>
+<circle cx="775" cy="167" r="6" fill="#2658A5" stroke="none" stroke-width="1"/>
+<path d="M510 193L510 167" stroke="#B14D28" stroke-width="3" fill="none"/>
+<circle cx="510" cy="167" r="6" fill="#fff" stroke="#B14D28" stroke-width="3"/>
+<text x="507" y="224" font-size="18" font-weight="400" fill="#B14D28" text-anchor="middle">Unpaired impact</text>
+<path d="M155 246L866 246" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<text x="858" y="270" font-size="18" font-weight="400" fill="#425C72" text-anchor="end">Time</text>
+<path d="M301 264L335 264" stroke="#425C72" stroke-width="2" fill="none" stroke-dasharray="7 5"/>
+<text x="350" y="270" font-size="18" font-weight="400" fill="#425C72" text-anchor="start">Matched with one shared lead or lag</text>
+  </g>
+</svg>

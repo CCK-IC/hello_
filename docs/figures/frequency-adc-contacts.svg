@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 277" role="img" aria-labelledby="title desc">
+  <title id="title">ADC contacts become tap events</title>
+  <desc id="desc">Three envelope excursions cross the entry threshold and drop below the release threshold. A brief dip inside the first contact does not create another tap. The intervals between accepted peaks are unequal.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3.5" orient="auto-start-reverse" viewBox="0 0 8 7"><path d="M0 0L7 3.5L0 7Z" fill="#425C72"/></marker>
+  </defs>
+  <rect x="1" y="1" width="898" height="275" rx="16" fill="#fff" stroke="#D8E4EB" stroke-width="2"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#122640">
+    <text x="24" y="41" font-size="18" font-weight="700" fill="#122640" text-anchor="start">ADC envelope</text>
+<text x="876" y="41" font-size="18" font-weight="400" fill="#425C72" text-anchor="end">Schematic</text>
+<rect x="171" y="56" width="134" height="131" rx="4" fill="#E8F6F2" stroke="none"/>
+<rect x="425" y="56" width="105" height="131" rx="4" fill="#E8F6F2" stroke="none"/>
+<rect x="715" y="56" width="92" height="131" rx="4" fill="#E8F6F2" stroke="none"/>
+<path d="M135 104L860 104" stroke="#087D77" stroke-width="2" fill="none" stroke-dasharray="7 5"/>
+<path d="M135 142L860 142" stroke="#B14D28" stroke-width="2" fill="none" stroke-dasharray="7 5"/>
+<text x="119" y="110" font-size="18" font-weight="400" fill="#087D77" text-anchor="end">Entry</text>
+<text x="119" y="148" font-size="18" font-weight="400" fill="#B14D28" text-anchor="end">Release</text>
+<path d="M134 187L862 187" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<text x="858" y="212" font-size="18" font-weight="400" fill="#425C72" text-anchor="end">Time</text>
+<path d="M137 177L159 175L174 100L199 68L217 85L231 150L243 120L255 92L274 109L286 146L301 166L338 173L391 174L408 168L428 98L457 65L485 96L507 148L524 170L580 174L677 177L698 166L717 101L746 77L768 99L787 153L804 170L849 175" fill="none" stroke="#087D77" stroke-width="4" stroke-linejoin="round"/>
+<circle cx="199" cy="68" r="6" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M199 187L199 234" stroke="#A2B7C8" stroke-width="2" fill="none" stroke-dasharray="4 4"/>
+<circle cx="457" cy="65" r="6" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M457 187L457 234" stroke="#A2B7C8" stroke-width="2" fill="none" stroke-dasharray="4 4"/>
+<circle cx="746" cy="77" r="6" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M746 187L746 234" stroke="#A2B7C8" stroke-width="2" fill="none" stroke-dasharray="4 4"/>
+<text x="238" y="64" font-size="18" font-weight="400" fill="#B14D28" text-anchor="start">Brief dip</text>
+<path d="M265 72L239 132" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M199 231L457 231" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+<path d="M457 231L746 231" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+<text x="328" y="257" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">Interval 1</text>
+<text x="602" y="257" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">Interval 2</text>
+  </g>
+</svg>

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 295" role="img" aria-labelledby="title desc">
+  <title id="title">From three IMU axes to two spectral peaks</title>
+  <desc id="desc">Four processing steps feed a schematic spectrum. A peak near 3 Hz is selected within the percussion band and a peak near 8 Hz within the vibration band.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3.5" orient="auto-start-reverse" viewBox="0 0 8 7"><path d="M0 0L7 3.5L0 7Z" fill="#425C72"/></marker>
+  </defs>
+  <rect x="1" y="1" width="898" height="293" rx="16" fill="#fff" stroke="#D8E4EB" stroke-width="2"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#122640">
+    <rect x="26" y="24" width="194" height="65" rx="8" fill="#EAF1FB" stroke="none"/>
+<text x="123" y="51" font-size="18" font-weight="700" fill="#122640" text-anchor="middle">Device samples</text>
+<text x="123" y="74" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">X, Y and Z</text>
+<path d="M223 56L240 56" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<rect x="243" y="24" width="194" height="65" rx="8" fill="#EAF1FB" stroke="none"/>
+<text x="340" y="51" font-size="18" font-weight="700" fill="#122640" text-anchor="middle">Linear resampling</text>
+<text x="340" y="74" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">Uniform time grid</text>
+<path d="M440 56L457 56" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<rect x="460" y="24" width="194" height="65" rx="8" fill="#EAF1FB" stroke="none"/>
+<text x="557" y="51" font-size="18" font-weight="700" fill="#122640" text-anchor="middle">Mean removal</text>
+<text x="557" y="74" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">and Hann taper</text>
+<path d="M657 56L674 56" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<rect x="677" y="24" width="194" height="65" rx="8" fill="#EAF1FB" stroke="none"/>
+<text x="774" y="51" font-size="18" font-weight="700" fill="#122640" text-anchor="middle">Direct DFT</text>
+<text x="774" y="74" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">Sum axis powers</text>
+<rect x="169" y="114" width="244" height="107" rx="4" fill="#E8F6F2" stroke="none"/>
+<text x="291.0" y="139" font-size="18" font-weight="700" fill="#087D77" text-anchor="middle">Percussion</text>
+<rect x="504.5" y="114" width="213.5" height="107" rx="4" fill="#EAF1FB" stroke="none"/>
+<text x="611.25" y="139" font-size="18" font-weight="700" fill="#2658A5" text-anchor="middle">Vibration</text>
+<path d="M108 221L852 221" stroke="#425C72" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<text x="83" y="197" font-size="18" font-weight="400" fill="#425C72" text-anchor="end">Power</text>
+<path d="M138.5 221L138.5 214" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M169.0 221L169.0 212" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M199.5 221L199.5 203" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M230 221L230 206" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M260.5 221L260.5 193" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M291 221L291 158" stroke="#087D77" stroke-width="5" fill="none"/>
+<circle cx="291" cy="158" r="5" fill="#087D77" stroke="none" stroke-width="1"/>
+<path d="M321.5 221L321.5 188" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M352 221L352 209" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M382.5 221L382.5 206" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M413 221L413 211" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M443.5 221L443.5 208" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M474 221L474 215" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M504.5 221L504.5 208" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M535 221L535 212" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M565.5 221L565.5 202" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M596 221L596 178" stroke="#2658A5" stroke-width="5" fill="none"/>
+<circle cx="596" cy="178" r="5" fill="#2658A5" stroke="none" stroke-width="1"/>
+<path d="M626.5 221L626.5 196" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M657 221L657 209" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M687.5 221L687.5 212" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M718 221L718 209" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M748.5 221L748.5 214" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M779 221L779 210" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M809.5 221L809.5 215" stroke="#96AEC5" stroke-width="3" fill="none"/>
+<path d="M108 221L108 228" stroke="#425C72" stroke-width="2" fill="none"/>
+<text x="108" y="249" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">0</text>
+<path d="M169 221L169 228" stroke="#425C72" stroke-width="2" fill="none"/>
+<text x="169" y="249" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">1</text>
+<path d="M413 221L413 228" stroke="#425C72" stroke-width="2" fill="none"/>
+<text x="413" y="249" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">5</text>
+<path d="M504.5 221L504.5 228" stroke="#425C72" stroke-width="2" fill="none"/>
+<text x="504.5" y="249" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">6.5</text>
+<path d="M718 221L718 228" stroke="#425C72" stroke-width="2" fill="none"/>
+<text x="718" y="249" font-size="18" font-weight="400" fill="#425C72" text-anchor="middle">10</text>
+<text x="847" y="274" font-size="18" font-weight="400" fill="#425C72" text-anchor="end">Frequency (Hz)</text>
+  </g>
+</svg>

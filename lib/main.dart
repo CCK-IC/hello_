@@ -201,6 +201,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
   void _resetAdcIngress() {
     _adcAssembler.reset();
+    _analysisAdcSamples.add(null);
     // AdcHistory owns its timeline. Start a fresh session using the contracted
     // API, retaining prior points separately until the shared buffer expires.
     _retainedAdcPoints.addAll(_adcHistory.points);
@@ -277,6 +278,8 @@ class _BleImuAppState extends State<BleImuApp> {
   final List<RawImuHistoryPoint> _rawHistory = [];
   final StreamController<RawImuHistoryPoint?> _analysisSamples =
       StreamController<RawImuHistoryPoint?>.broadcast(sync: true);
+  final _analysisAdcSamples =
+      StreamController<AdcHistoryPoint?>.broadcast(sync: true);
   Duration _rawHistoryRetention = const Duration(minutes: 10);
   AdcHistory _adcHistory = AdcHistory();
   final List<AdcHistoryPoint> _retainedAdcPoints = [];
@@ -372,7 +375,8 @@ class _BleImuAppState extends State<BleImuApp> {
         if (assembly.invalid) {
           _invalidAdcPacketCount++;
         } else if (assembly.frame != null) {
-          if (!_adcHistory.addPacket(assembly.frame!, receivedAt: now)) {
+          if (!_adcHistory.addPacket(assembly.frame!,
+              receivedAt: now, onPoint: _analysisAdcSamples.add)) {
             _invalidAdcPacketCount++;
           }
           _trimRetainedAdcPoints();
@@ -857,6 +861,7 @@ class _BleImuAppState extends State<BleImuApp> {
     _bleDataSubscription?.cancel();
     _bleDataController.close();
     _analysisSamples.close();
+    _analysisAdcSamples.close();
 
     UniversalBle.onScanResult = null;
     UniversalBle.onValueChange = null;
@@ -948,8 +953,10 @@ class _BleImuAppState extends State<BleImuApp> {
               icon: const Icon(Icons.analytics_outlined),
               onPressed: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) =>
-                      ImuAnalysisPage(samples: _analysisSamples.stream),
+                  builder: (_) => ImuAnalysisPage(
+                    samples: _analysisSamples.stream,
+                    adcSamples: _analysisAdcSamples.stream,
+                  ),
                 ),
               ),
             ),

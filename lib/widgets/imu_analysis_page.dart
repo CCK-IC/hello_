@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:file_saver/file_saver.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../models/adc_frequency_analysis.dart';
+import '../models/adc_history.dart';
 import '../models/frequency_history.dart';
 import '../models/frequency_recording_csv.dart';
 import '../models/imu_frequency_analysis.dart';
@@ -14,10 +17,16 @@ import 'frequency_history_chart.dart';
 /// Live, session-scoped analysis of one connected glove.
 /// A null event clears the current session.
 class ImuAnalysisPage extends StatefulWidget {
-  const ImuAnalysisPage(
-      {super.key, required this.samples, this.clock, this.saveCsv});
+  const ImuAnalysisPage({
+    super.key,
+    required this.samples,
+    this.adcSamples,
+    this.clock,
+    this.saveCsv,
+  });
 
   final Stream<RawImuHistoryPoint?> samples;
+  final Stream<AdcHistoryPoint?>? adcSamples;
 
   /// Optional clock for deterministic tests.
   final DateTime Function()? clock;
@@ -36,12 +45,10 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   static const _maxSamples = 4096;
 
   final _points = <RawImuHistoryPoint>[];
+  final _adcPoints = ListQueue<AdcHistoryPoint>();
   final _frequencyHistory = FrequencyHistory();
   final _recordedFrequency = <FrequencyHistoryPoint>[];
-  final Set<FrequencySeries> _selectedSeries = {
-    FrequencySeries.percussion,
-    FrequencySeries.vibration,
-  };
+  final _selectedSeries = FrequencySeries.values.toSet();
   Duration _chartPeriod = const Duration(seconds: 10);
   Duration _recordingPeriod = const Duration(seconds: 10);
   DateTime? _recordingStartedAt;
@@ -49,6 +56,12 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   bool _recording = false;
   bool _saving = false;
   RawImuHistoryPoint? _lastLoggedSample;
+  AdcHistoryPoint? _lastLoggedAdc;
+  bool _adcSeen = false;
+  int _adcChannel = 0;
+  final _adcHighThresholds = <int, int>{};
+  int? get _adcHighThreshold => _adcHighThresholds[_adcChannel];
+  int _adcEpoch = 0;
   bool _gapLogged = false;
   RawSensorType _sensor = RawSensorType.accelerometer;
   final _lowerMin = TextEditingController(
@@ -61,9 +74,13 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       text: ImuFrequencyAnalyzer.defaultBands[1].maxHz.toString());
   late List<FrequencyBand> _bands;
   StreamSubscription<RawImuHistoryPoint?>? _subscription;
+  StreamSubscription<AdcHistoryPoint?>? _adcSubscription;
   Timer? _timer;
   DateTime? _lastArrival;
+  DateTime? _lastAdcArrival;
   ImuFrequencyAnalysis? _analysis;
+  ImuFrequencyAnalysis? _adcAnalysis;
+  ImuFrequencyAnalysis? _fusedAnalysis;
   String? _bandError;
   bool _streamEnded = false;
   DateTime _now() => widget.clock?.call() ?? DateTime.now();
@@ -82,6 +99,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
           ImuFrequencyAnalyzer.defaultBands[1].maxHz),
     ];
     _listen();
+    _listenAdc();
     _timer = Timer.periodic(
         const Duration(seconds: 1), (_) => _update(recordHistory: true));
   }
@@ -94,6 +112,41 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       _reset();
       _listen();
     }
+    if (oldWidget.adcSamples != widget.adcSamples) {
+      _adcSubscription?.cancel();
+      _clearAdc();
+      _listenAdc();
+    }
+  }
+
+  void _listenAdc() {
+    _adcSubscription = widget.adcSamples?.listen((point) {
+      if (!mounted) return;
+      if (point == null) {
+        setState(_clearAdc);
+        return;
+      }
+      _adcSeen = true;
+      _lastAdcArrival = _now();
+      _adcPoints.addLast(point);
+      final cutoff = point.receivedAt.subtract(_retention);
+      while (_adcPoints.length > _maxSamples ||
+          _adcPoints.first.receivedAt.isBefore(cutoff)) {
+        _adcPoints.removeFirst();
+      }
+    }, onDone: _adcEnded, onError: (Object _) => _adcEnded());
+  }
+
+  void _adcEnded() {
+    if (mounted) setState(_clearAdc);
+  }
+
+  void _clearAdc() {
+    _adcPoints.clear();
+    _lastAdcArrival = null;
+    _adcAnalysis = null;
+    _fusedAnalysis = null;
+    _adcEpoch++;
   }
 
   void _listen() {
@@ -135,8 +188,11 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       _recording = false;
     }
     _points.clear();
+    _clearAdc();
+    _adcSeen = false;
     _frequencyHistory.clear();
     _lastLoggedSample = null;
+    _lastLoggedAdc = null;
     _gapLogged = false;
     _lastArrival = null;
     _analysis = null;
@@ -145,36 +201,68 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
 
   void _update({bool recordHistory = false}) {
     if (!mounted) return;
-    final arrival = _lastArrival;
-    if (arrival == null || _now().difference(arrival) >= _staleAfter) {
-      if (_analysis != null || (arrival != null && _points.isNotEmpty)) {
-        setState(() {
-          if (recordHistory) _appendGap('Raw IMU data stopped.');
-          _analysis = null;
-          _points.clear();
-          _lastLoggedSample = null;
-        });
-      }
-      return;
+    final now = _now();
+    final imuFresh = _fresh(_lastArrival, now);
+    final adcFresh = _fresh(_lastAdcArrival, now);
+    if (!imuFresh) _points.clear();
+    if (!adcFresh && _adcPoints.isNotEmpty) {
+      _adcPoints.clear();
+      _adcEpoch++;
     }
-    final analysis = ImuFrequencyAnalyzer.analyze(
-      _points,
-      bands: _bands,
-      sensor: _sensor,
-    );
+    final latestImu = imuFresh && _points.isNotEmpty ? _points.last : null;
+    final latestAdc =
+        adcFresh && _adcPoints.isNotEmpty ? _adcPoints.last : null;
+    final analysis = latestImu == null
+        ? null
+        : ImuFrequencyAnalyzer.analyze(_points, bands: _bands, sensor: _sensor);
+    final adcResults = latestAdc == null
+        ? null
+        : AdcFrequencyAnalyzer.analyze(
+            _adcPoints.toList(growable: false), _points,
+            bands: _bands,
+            sensor: _sensor,
+            channel: _adcChannel,
+            highThreshold: _adcHighThreshold);
     setState(() {
       _analysis = analysis;
+      _adcAnalysis = adcResults?.adc;
+      _fusedAnalysis = adcResults?.fused;
       if (recordHistory &&
-          _points.isNotEmpty &&
-          !identical(_lastLoggedSample, _points.last)) {
-        _lastLoggedSample = _points.last;
+          (!identical(_lastLoggedSample, latestImu) ||
+              !identical(_lastLoggedAdc, latestAdc))) {
+        final rawStopped = _lastLoggedSample != null && latestImu == null;
+        _lastLoggedSample = latestImu;
+        _lastLoggedAdc = latestAdc;
         _gapLogged = false;
-        _appendFrequency(FrequencyHistoryPoint(
-            timestamp: _now(), sensor: _sensor, analysis: analysis));
+        if (latestImu == null && latestAdc == null) {
+          _appendGap(
+              rawStopped ? 'Raw IMU data stopped.' : 'ADC data stopped.');
+        } else {
+          _appendFrequency(FrequencyHistoryPoint(
+            timestamp: now,
+            sensor: _sensor,
+            analysis:
+                analysis ?? _unavailable(_bands, 'Raw IMU data unavailable.'),
+            adc: _adcSeen
+                ? _adcAnalysis ??
+                    _unavailable([_bands.first], 'ADC data unavailable.')
+                : null,
+            fused: _adcSeen
+                ? _fusedAnalysis ??
+                    _unavailable(_bands, 'ADC data unavailable.')
+                : null,
+            adcChannel: _adcChannel,
+            adcEpoch: _adcEpoch,
+            adcHighThreshold: _adcHighThreshold,
+          ));
+        }
       }
-      _frequencyHistory.prune(_now());
+      _frequencyHistory.prune(now);
     });
   }
+
+  bool _fresh(DateTime? arrival, DateTime now) =>
+      arrival != null && now.difference(arrival) < _staleAfter;
 
   void _appendFrequency(FrequencyHistoryPoint point) {
     // A wall-clock correction starts a new display segment instead of
@@ -193,18 +281,26 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
     _appendFrequency(FrequencyHistoryPoint(
       timestamp: _now(),
       sensor: _sensor,
-      analysis: ImuFrequencyAnalysis(
+      analysis: _unavailable(_bands, reason),
+      adc: _adcSeen ? _unavailable([_bands.first], reason) : null,
+      fused: _adcSeen ? _unavailable(_bands, reason) : null,
+      adcChannel: _adcChannel,
+      adcEpoch: _adcEpoch,
+      adcHighThreshold: _adcHighThreshold,
+    ));
+  }
+
+  ImuFrequencyAnalysis _unavailable(List<FrequencyBand> bands, String reason) =>
+      ImuFrequencyAnalysis(
         error: reason,
         sampleRateHz: null,
         nyquistHz: null,
         duration: Duration.zero,
         sampleCount: 0,
         bands: [
-          for (final band in _bands) FrequencyBandResult(band, null, reason)
+          for (final band in bands) FrequencyBandResult(band, null, reason)
         ],
-      ),
-    ));
-  }
+      );
 
   void _applyBands() {
     final values = [_lowerMin, _lowerMax, _upperMin, _upperMax]
@@ -227,6 +323,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       ];
       _analysis = null;
       _lastLoggedSample = null;
+      _lastLoggedAdc = null;
     });
     _update();
   }
@@ -359,6 +456,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
     _timer?.cancel();
     _recordingTimer?.cancel();
     _subscription?.cancel();
+    _adcSubscription?.cancel();
     _lowerMin.dispose();
     _lowerMax.dispose();
     _upperMin.dispose();
@@ -414,35 +512,169 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
     );
   }
 
-  Widget _frequencyResults(ImuFrequencyAnalysis? analysis) {
+  Widget _frequencyResults(ImuFrequencyAnalysis? analysis,
+      {required bool adcFresh}) {
+    final showAdc = widget.adcSamples != null;
+    final adc = adcFresh ? _adcAnalysis : null;
+    final fused = adcFresh ? _fusedAnalysis : null;
     return _AnalysisSection(
-      title: 'Candidate spectral peaks',
+      title: 'Frequency estimates',
       children: [
         const Text(
             'A peak may reflect noise or a harmonic, rather than the movement frequency. Weak real signals may be suppressed. Verify against a reference measurement.'),
         const SizedBox(height: 12),
         _ControlGrid(
           minWidth: 254,
-          maxColumns: 2,
+          maxColumns: showAdc ? 3 : 2,
           children: [
             for (var i = 0; i < _bands.length; i++)
-              _frequencyResult(analysis, i),
+              _frequencyResult(
+                i == 0 ? FrequencySeries.percussion : FrequencySeries.vibration,
+                analysis,
+                key: 'frequency-result-$i',
+              ),
+            if (showAdc)
+              _frequencyResult(FrequencySeries.adcPercussion, adc,
+                  waiting: 'Waiting for ADC samples.'),
           ],
         ),
+        if (showAdc) ...[
+          const SizedBox(height: 16),
+          Semantics(
+            header: true,
+            child: Text('Fused ADC + IMU',
+                style: Theme.of(context).textTheme.titleMedium),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(width: 230, child: _adcChannelSelect()),
+          if (!adcFresh) ...[
+            const SizedBox(height: 8),
+            const Text(
+                'Enable Auxiliary sensor in BLE subscriptions to receive ADC data.'),
+          ],
+          const SizedBox(height: 12),
+          _ControlGrid(
+            minWidth: 254,
+            maxColumns: 2,
+            children: [
+              for (final series in [
+                FrequencySeries.fusedPercussion,
+                FrequencySeries.fusedVibration
+              ])
+                _frequencyResult(series, fused,
+                    waiting: 'Waiting for both ADC and IMU samples.'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: _selectVibrationGate,
+            child: Text(_adcHighThreshold == null
+                ? 'Vibration gate: Automatic'
+                : 'Vibration gate: ≥ $_adcHighThreshold counts'),
+          ),
+        ],
       ],
     );
   }
 
-  Widget _frequencyResult(ImuFrequencyAnalysis? analysis, int index) {
+  Widget _adcChannelSelect() {
+    final activeCount =
+        _adcPoints.isEmpty ? 8 : _adcPoints.last.sample.activeChannelCount;
+    return _OptionSelect(
+      label: 'ADC analysis channel',
+      value: _adcChannel,
+      options: {for (var i = 0; i < 8; i++) i: 'Channel ${i + 1}'},
+      disabledValues: {for (var i = activeCount; i < 8; i++) i},
+      onChanged: (channel) {
+        if (channel == null || channel == _adcChannel) return;
+        _adcChannel = channel;
+        _lastLoggedAdc = null;
+        _update();
+      },
+    );
+  }
+
+  Future<void> _selectVibrationGate() async {
+    final channel = _adcChannel;
+    var input = _adcHighThreshold?.toString() ?? '';
+    String? error;
+    final result = await showDialog<({int? threshold})>(
+      context: context,
+      builder: (context) => StatefulBuilder(builder: (context, updateDialog) {
+        final latest = _adcPoints.isEmpty ? null : _adcPoints.last.sample;
+        return AlertDialog(
+          title: Text('Vibration gate · Channel ${channel + 1}'),
+          scrollable: true,
+          content: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Set the minimum ADC count for vibration. Leave blank '
+                  'to detect a rise from a recent low reading automatically.'),
+              if (latest != null && channel < latest.activeChannelCount)
+                Text('Last reading: ${latest.channels[channel]} counts'),
+              const SizedBox(height: 12),
+              TextFormField(
+                initialValue: input,
+                onChanged: (value) => input = value,
+                keyboardType:
+                    const TextInputType.numberWithOptions(signed: true),
+                decoration: InputDecoration(
+                  labelText: 'ADC high threshold (counts)',
+                  errorText: error,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final text = input.trim();
+                final value = int.tryParse(text);
+                if (text.isNotEmpty &&
+                    (value == null || value < -32768 || value > 32767)) {
+                  updateDialog(() =>
+                      error = 'Enter a whole count from −32768 to 32767.');
+                  return;
+                }
+                Navigator.pop(context, (threshold: value));
+              },
+              child: const Text('Apply gate'),
+            ),
+          ],
+        );
+      }),
+    );
+    if (!mounted ||
+        result == null ||
+        result.threshold == _adcHighThresholds[channel]) {
+      return;
+    }
+    if (result.threshold case final threshold?) {
+      _adcHighThresholds[channel] = threshold;
+    } else {
+      _adcHighThresholds.remove(channel);
+    }
+    _lastLoggedAdc = null;
+    _update();
+  }
+
+  Widget _frequencyResult(
+      FrequencySeries series, ImuFrequencyAnalysis? analysis,
+      {String? key, String waiting = 'Waiting for reliable samples.'}) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final index = series.bandIndex;
     final result = analysis != null && index < analysis.bands.length
         ? analysis.bands[index]
         : null;
     final band = result?.band ?? _bands[index];
     final peak = result?.peakHz;
     return Container(
-      key: ValueKey('frequency-result-$index'),
+      key: ValueKey(key ?? 'frequency-result-${series.name}'),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
@@ -451,7 +683,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(band.label, style: theme.textTheme.titleSmall),
+          Text(series.label, style: theme.textTheme.titleSmall),
           Text('${band.minHz}–${band.maxHz} Hz',
               style: theme.textTheme.bodySmall),
           const SizedBox(height: 8),
@@ -466,10 +698,13 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
           const SizedBox(height: 4),
           Text(
             peak == null
-                ? result?.unavailableReason ??
-                    analysis?.error ??
-                    'Waiting for reliable samples.'
-                : 'Candidate estimate',
+                ? result?.unavailableReason ?? analysis?.error ?? waiting
+                : switch (series) {
+                    FrequencySeries.adcPercussion ||
+                    FrequencySeries.fusedPercussion =>
+                      'Typical tap cadence',
+                    _ => 'Candidate estimate',
+                  },
             style: theme.textTheme.bodySmall,
           ),
         ],
@@ -520,34 +755,38 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       title: 'Frequency history',
       children: [
         const Text(
-            'Each point is a candidate peak from an overlapping 8-second analysis window, updated at most once per second. Gaps mean no reliable estimate.'),
+            'Estimates update once per second from recent samples. Gaps mean no reliable estimate.'),
         const SizedBox(height: 8),
         const Text(
-            'History is kept while this page is open and clears on disconnect. Lines also break when the sensor or band settings change.'),
+            'History clears on disconnect. Lines break when the input or band settings change.'),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
           runSpacing: 4,
           children: [
             for (final series in FrequencySeries.values)
-              FilterChip(
-                label: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(series.marker, size: 12, color: series.color(scheme)),
-                    const SizedBox(width: 6),
-                    Flexible(child: Text(series.label)),
-                  ],
+              if (widget.adcSamples != null ||
+                  series == FrequencySeries.percussion ||
+                  series == FrequencySeries.vibration)
+                FilterChip(
+                  label: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(series.marker,
+                          size: 12, color: series.color(scheme)),
+                      const SizedBox(width: 6),
+                      Flexible(child: Text(series.label)),
+                    ],
+                  ),
+                  selected: _selectedSeries.contains(series),
+                  onSelected: (selected) => setState(() {
+                    if (selected) {
+                      _selectedSeries.add(series);
+                    } else {
+                      _selectedSeries.remove(series);
+                    }
+                  }),
                 ),
-                selected: _selectedSeries.contains(series),
-                onSelected: (selected) => setState(() {
-                  if (selected) {
-                    _selectedSeries.add(series);
-                  } else {
-                    _selectedSeries.remove(series);
-                  }
-                }),
-              ),
           ],
         ),
         const SizedBox(height: 12),
@@ -555,7 +794,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
           minWidth: 192,
           maxColumns: 2,
           children: [
-            _DurationSelect(
+            _OptionSelect(
               label: 'Display window',
               value: _chartPeriod.inSeconds,
               options: const {
@@ -570,7 +809,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
                 }
               },
             ),
-            _DurationSelect(
+            _OptionSelect(
               label: 'History buffer',
               value: _frequencyHistory.retention.inMinutes,
               options: const {
@@ -619,7 +858,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       children: [
         SizedBox(
           width: 280,
-          child: _DurationSelect(
+          child: _OptionSelect(
             label: 'Recording duration',
             value: options.containsKey(seconds) ? seconds : -1,
             options: options,
@@ -698,7 +937,9 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   @override
   Widget build(BuildContext context) {
     final arrival = _lastArrival;
-    final stale = arrival != null && _now().difference(arrival) >= _staleAfter;
+    final now = _now();
+    final stale = arrival != null && !_fresh(arrival, now);
+    final adcFresh = _fresh(_lastAdcArrival, now);
     final analysis = stale ? null : _analysis;
     final theme = Theme.of(context);
     final titleSize = theme.textTheme.titleLarge?.fontSize ?? 22;
@@ -726,12 +967,11 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
                   Semantics(
                     container: true,
                     header: true,
-                    child: Text('Single glove · live IMU',
+                    child: Text('Single glove · live sensors',
                         style: theme.textTheme.headlineSmall),
                   ),
                   const SizedBox(height: 8),
-                  const Text(
-                      'Explore periodic motion in the selected IMU signal. Peaks are estimates, not a clinical assessment.'),
+                  const Text('Select the IMU signal for motion analysis.'),
                   const SizedBox(height: 12),
                   Semantics(
                     label: 'IMU signal',
@@ -766,15 +1006,16 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
                       stale: stale,
                       analysis: analysis),
                   const SizedBox(height: 12),
-                  _frequencyResults(analysis),
+                  _frequencyResults(analysis, adcFresh: adcFresh),
                   const SizedBox(height: 12),
                   _bandSettings(),
                   const SizedBox(height: 12),
                   _historySection(),
                   const SizedBox(height: 12),
                   _recordingSection(
-                    canRecord:
-                        arrival != null && !stale && !_streamEnded && !_saving,
+                    canRecord: ((arrival != null && !stale && !_streamEnded) ||
+                            adcFresh) &&
+                        !_saving,
                   ),
                 ],
               ),
@@ -858,13 +1099,14 @@ class _ControlGrid extends StatelessWidget {
   }
 }
 
-class _DurationSelect extends StatelessWidget {
-  const _DurationSelect({
+class _OptionSelect extends StatelessWidget {
+  const _OptionSelect({
     required this.label,
     required this.value,
     required this.options,
     required this.onChanged,
     this.semanticValue,
+    this.disabledValues = const {},
   });
 
   final String label;
@@ -872,6 +1114,7 @@ class _DurationSelect extends StatelessWidget {
   final Map<int, String> options;
   final ValueChanged<int?>? onChanged;
   final String? semanticValue;
+  final Set<int> disabledValues;
 
   @override
   Widget build(BuildContext context) {
@@ -903,7 +1146,10 @@ class _DurationSelect extends StatelessWidget {
                 items: [
                   for (final entry in options.entries)
                     DropdownMenuItem(
-                        value: entry.key, child: Text(entry.value)),
+                      value: entry.key,
+                      enabled: !disabledValues.contains(entry.key),
+                      child: Text(entry.value),
+                    ),
                 ],
                 selectedItemBuilder: (context) => [
                   for (final name in options.values)

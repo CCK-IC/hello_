@@ -8,19 +8,34 @@ class FrequencyHistoryPoint {
   final DateTime timestamp;
   final RawSensorType sensor;
   final ImuFrequencyAnalysis analysis;
+  final ImuFrequencyAnalysis? adc;
+  final ImuFrequencyAnalysis? fused;
+  final int adcChannel;
+  final int adcEpoch;
+  final int? adcHighThreshold;
 
   FrequencyHistoryPoint({
     required this.timestamp,
     required this.sensor,
     required ImuFrequencyAnalysis analysis,
-  }) : analysis = ImuFrequencyAnalysis(
-          error: analysis.error,
-          sampleRateHz: analysis.sampleRateHz,
-          nyquistHz: analysis.nyquistHz,
-          duration: analysis.duration,
-          sampleCount: analysis.sampleCount,
-          bands: List.unmodifiable(analysis.bands),
-        );
+    ImuFrequencyAnalysis? adc,
+    ImuFrequencyAnalysis? fused,
+    this.adcChannel = 0,
+    this.adcEpoch = 0,
+    this.adcHighThreshold,
+  })  : analysis = _snapshot(analysis),
+        adc = adc == null ? null : _snapshot(adc),
+        fused = fused == null ? null : _snapshot(fused);
+
+  static ImuFrequencyAnalysis _snapshot(ImuFrequencyAnalysis analysis) =>
+      ImuFrequencyAnalysis(
+        error: analysis.error,
+        sampleRateHz: analysis.sampleRateHz,
+        nyquistHz: analysis.nyquistHz,
+        duration: analysis.duration,
+        sampleCount: analysis.sampleCount,
+        bands: List.unmodifiable(analysis.bands),
+      );
 }
 
 /// Time-bounded, chronological frequency estimates for the current session.

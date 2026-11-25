@@ -111,8 +111,11 @@ void main() {
         isImage: true,
         label: 'Frequency history over the last 5 seconds. '
             'The frequency axis runs from 0 Hz to 2.2 Hz. '
-            'The latest plotted peak for Percussion band was 2.00 Hz, 2 seconds ago. '
-            'Vibration band has no estimate in this window. '
+            'The latest plotted peak for IMU percussion was 2.00 Hz, 2 seconds ago. '
+            'IMU vibration has no estimate in this window. '
+            'ADC percussion has no estimate in this window. '
+            'Fused percussion has no estimate in this window. '
+            'Fused vibration has no estimate in this window. '
             'Gaps mark missing estimates or changes in sensor or band settings.',
       ),
     );

@@ -125,7 +125,8 @@ class AdcHistory {
   }
 
   /// Returns false for malformed or unsupported packets.
-  bool addPacket(Uint8List bytes, {DateTime? receivedAt}) {
+  bool addPacket(Uint8List bytes,
+      {DateTime? receivedAt, void Function(AdcHistoryPoint)? onPoint}) {
     final decoded = AdcSample.decodeAll(bytes);
     if (decoded == null) return false;
     final samples = decoded.where((sample) => sample.gloveId == 0).toList();
@@ -137,8 +138,9 @@ class AdcHistory {
             samples.map((sample) => sample.timestampMs).toList(), arrival)
         : null;
     for (var i = 0; i < samples.length; i++) {
-      _points
-          .addLast(AdcHistoryPoint(arrival, samples[i], sampleTime: times?[i]));
+      final point = AdcHistoryPoint(arrival, samples[i], sampleTime: times?[i]);
+      _points.addLast(point);
+      onPoint?.call(point);
     }
     while (_points.length > _maxSamples) {
       _points.removeFirst();

@@ -1,10 +1,40 @@
 # BLE project handoff
 
-Last updated: 2026-11-20. Update this file after each meaningful test or change,
+Last updated: 2026-11-24. Update this file after each meaningful test or change,
 including the result, relevant commit, and remaining work. Share the updated
 file through the repository's normal Git workflow so other checkouts receive it.
 
 The app and sensor firmware are separate repositories. Mac and Windows also use separate checkouts: verify each checkout's repository, branch, commits, and local changes before transferring work. A commit in one checkout does not automatically update another.
+
+## ADC and fused frequency analysis, 2026-11-24
+
+- App patch **1.1.1+3** adds standalone ADC percussion and two fused ADC + IMU
+  estimates to the live analysis page, frequency history, and CSV.
+- Enable **Auxiliary sensor** in the dashboard subscriptions, then choose the
+  input under **ADC analysis channel**. ADC percussion uses the median of tap
+  intervals in the configured band. Fused percussion allows a short consistent
+  offset when matching ADC taps to IMU impacts using glove timestamps. Fused
+  vibration tolerates short dips during ADC highs. The optional per-channel
+  **Vibration gate** uses a fixed ADC count when no recent low reference is
+  available. Isolated missing and invalid samples leave usable data in the
+  analysis, while a long interruption starts a shorter window.
+- The dashboard regression feeds v3 IMU and ADC batches at unequal rates and
+  verifies a 2 Hz percussion cadence and an 8 Hz gated vibration in the readouts
+  and plot. The model tests also exercise shifted impacts, vibration outside
+  the gate, absent inputs, gaps, and device clock rollover.
+- An eight-second idle CoreBluetooth capture from `XIAO-IMU-RAW-75F2` decoded
+  830 ADC and 547 IMU samples and produced no motion estimates. A subsequent
+  30-second capture during user movement decoded 3,120 ADC and 2,723 IMU
+  samples. Repeated ADC threshold crossings made the initial percussion
+  detector intermittent. The revised detector smooths noise, requires a
+  release between contacts, and corroborates noisy taps with rapid IMU changes.
+- Replaying the motion packets produced ADC and fused percussion estimates
+  near 2.6 Hz and 2.8 Hz on the two tap sequences. The two sustained presses
+  produced fused vibration in the 8.8–9.8 Hz range. The replay uses the app's
+  production decoders and analysis model. No independent vibration frequency
+  reference was used.
+- Verification passed with 141 Flutter VM tests, 28 focused Chrome tests,
+  clean static analysis, and a successful web release build.
 
 ## Stable V3 publication, 2026-11-20
 

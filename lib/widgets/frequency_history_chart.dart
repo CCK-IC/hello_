@@ -3,20 +3,46 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../models/frequency_history.dart';
+import '../models/imu_frequency_analysis.dart';
 
 enum FrequencySeries {
-  percussion('Percussion band', Icons.circle),
-  vibration('Vibration band', Icons.square);
+  percussion('IMU percussion', Icons.circle, 0),
+  vibration('IMU vibration', Icons.square, 1),
+  adcPercussion('ADC percussion', Icons.change_history, 0),
+  fusedPercussion('Fused percussion', Icons.diamond_outlined, 0),
+  fusedVibration('Fused vibration', Icons.add, 1);
 
-  const FrequencySeries(this.label, this.marker);
+  const FrequencySeries(this.label, this.marker, this.bandIndex);
 
   final String label;
   final IconData marker;
+  final int bandIndex;
 
   Color color(ColorScheme scheme) => switch (this) {
         percussion => scheme.primary,
         vibration => scheme.tertiary,
+        adcPercussion => scheme.error,
+        fusedPercussion => scheme.brightness == Brightness.dark
+            ? const Color(0xFFFFD180)
+            : const Color(0xFF825000),
+        fusedVibration => scheme.brightness == Brightness.dark
+            ? const Color(0xFFB7EC92)
+            : const Color(0xFF3D650D),
       };
+
+  FrequencyBandResult? result(FrequencyHistoryPoint point) {
+    final analysis = switch (this) {
+      percussion || vibration => point.analysis,
+      adcPercussion => point.adc,
+      fusedPercussion || fusedVibration => point.fused,
+    };
+    if (analysis == null ||
+        analysis.error != null ||
+        analysis.bands.length <= bandIndex) {
+      return null;
+    }
+    return analysis.bands[bandIndex];
+  }
 }
 
 /// A rolling plot of candidate peaks. Missing estimates remain visible as gaps.
@@ -164,24 +190,30 @@ class _ChartMessage extends StatelessWidget {
 }
 
 double? _value(FrequencyHistoryPoint point, FrequencySeries series) {
-  final index = series.index;
-  if (point.analysis.error != null || point.analysis.bands.length <= index) {
-    return null;
-  }
-  final value = point.analysis.bands[index].peakHz;
+  final value = series.result(point)?.peakHz;
   return value != null && value.isFinite ? value : null;
 }
 
 bool _sameConfiguration(
     FrequencyHistoryPoint a, FrequencyHistoryPoint b, FrequencySeries series) {
-  if (a.sensor != b.sensor ||
-      a.analysis.bands.length <= series.index ||
-      b.analysis.bands.length <= series.index) {
+  if (series == FrequencySeries.fusedVibration &&
+      a.adcHighThreshold != b.adcHighThreshold) {
     return false;
   }
-  final first = a.analysis.bands[series.index].band;
-  final second = b.analysis.bands[series.index].band;
-  return first.minHz == second.minHz && first.maxHz == second.maxHz;
+  if (series != FrequencySeries.adcPercussion && a.sensor != b.sensor) {
+    return false;
+  }
+  if (series != FrequencySeries.percussion &&
+      series != FrequencySeries.vibration &&
+      (a.adcChannel != b.adcChannel || a.adcEpoch != b.adcEpoch)) {
+    return false;
+  }
+  final first = series.result(a)?.band;
+  final second = series.result(b)?.band;
+  return first != null &&
+      second != null &&
+      first.minHz == second.minHz &&
+      first.maxHz == second.maxHz;
 }
 
 /// Separates discontinuities so a missing estimate or new configuration is not
@@ -262,11 +294,34 @@ class _FrequencyPainter extends CustomPainter {
           canvas.drawPath(Path()..addPolygon(positions, false), line);
         }
         for (final pos in positions) {
-          if (series == FrequencySeries.percussion) {
-            canvas.drawCircle(pos, 3, marker);
-          } else {
-            canvas.drawRect(
-                Rect.fromCenter(center: pos, width: 5, height: 5), marker);
+          switch (series) {
+            case FrequencySeries.percussion:
+              canvas.drawCircle(pos, 3, marker);
+            case FrequencySeries.vibration:
+              canvas.drawRect(
+                  Rect.fromCenter(center: pos, width: 5, height: 5), marker);
+            case FrequencySeries.adcPercussion:
+              canvas.drawPath(
+                  Path()
+                    ..addPolygon([
+                      pos.translate(0, -4),
+                      pos.translate(4, 3),
+                      pos.translate(-4, 3),
+                    ], true),
+                  line);
+            case FrequencySeries.fusedPercussion:
+              canvas.drawPath(
+                  Path()
+                    ..addPolygon([
+                      pos.translate(0, -5),
+                      pos.translate(5, 0),
+                      pos.translate(0, 5),
+                      pos.translate(-5, 0),
+                    ], true),
+                  line);
+            case FrequencySeries.fusedVibration:
+              canvas.drawLine(pos.translate(-5, 0), pos.translate(5, 0), line);
+              canvas.drawLine(pos.translate(0, -5), pos.translate(0, 5), line);
           }
         }
       }
