@@ -58,8 +58,9 @@ Uint8List sensorFrame(
   return data.buffer.asUint8List();
 }
 
-Uint8List statusFrame({int mask = 1}) {
-  final d = ByteData(108);
+Uint8List statusFrame(
+    {int mask = 1, Map<int, int> adcNotificationRates = const {}}) {
+  final d = ByteData(adcNotificationRates.isEmpty ? 108 : 112);
   d.setUint8(0, 3);
   d.setUint8(1, 4);
   d.setUint8(2, mask);
@@ -83,7 +84,9 @@ Uint8List statusFrame({int mask = 1}) {
     }.entries) {
       d.setUint8(o + entry.key, entry.value);
     }
-    d.setUint16(o + 22, 3, Endian.little);
+    final adcRate = adcNotificationRates[glove];
+    d.setUint16(o + 22, adcRate == null ? 3 : 7, Endian.little);
+    if (adcRate != null) d.setUint16(108 + glove * 2, adcRate, Endian.little);
     for (final entry in {
       24: 123456,
       28: 123,

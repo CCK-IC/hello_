@@ -245,6 +245,7 @@ void main() {
     expect(s.uptimeMs, 0xfedcba98);
     expect([s.requestedRate, s.actualSensorRate, s.notificationRate],
         [200, 199, 50]);
+    expect(s.adcNotificationRate, isNull);
     expect([
       s.batteryMilliVolts,
       s.attMtu,
@@ -278,6 +279,35 @@ void main() {
       0xf1234567,
       -12345
     ]);
+  });
+
+  test('status v3 decodes independent ADC rates and a reported zero', () {
+    final frame = statusFrame(mask: 3, adcNotificationRates: {0: 0, 1: 1234});
+    final statuses = DeviceStatus.decodeAll(frame)!;
+    expect(statuses.map((s) => s.gloveId), [0, 1]);
+    expect(statuses.map((s) => s.adcNotificationRate), [0, 1234]);
+    expect(statuses.map((s) => s.notificationRate), [50, 50]);
+    expect(statuses.map((s) => s.lastError), [-12345, -12345]);
+    expect(DeviceStatus.decode(frame)!.adcNotificationRate, 0);
+
+    final mixed = statusFrame(mask: 3, adcNotificationRates: {1: 1234});
+    expect(DeviceStatus.decodeAll(mixed)!.map((s) => s.adcNotificationRate),
+        [null, 1234]);
+  });
+
+  test('status v3 validates ADC presence flags and empty extension bytes', () {
+    final frame = statusFrame(adcNotificationRates: {0: 42});
+    expect(DeviceStatus.decode(frame)!.adcNotificationRate, 42);
+    for (final invalid in [
+      Uint8List.sublistView(frame, 0, 108),
+      Uint8List.fromList(frame)..[26] = 3,
+      Uint8List.fromList(frame)..[26] = 15,
+      Uint8List.fromList(frame)..[110] = 1,
+      statusFrame(mask: 3, adcNotificationRates: {0: 42})..[110] = 1,
+      Uint8List.fromList([...statusFrame(), 0, 0, 0, 0]),
+    ]) {
+      expect(DeviceStatus.decodeAll(invalid), isNull);
+    }
   });
 
   test('status v3 strict length, presence and whole peer validation', () {
@@ -351,6 +381,8 @@ void main() {
     expect(DeviceStatus.decodeAll(status2)!.single.version, 2);
     expect(DeviceStatus.decode(status1)!.featureFlags, 0);
     expect(DeviceStatus.decode(status2)!.bufferDroppedSamples, 0);
+    expect(DeviceStatus.decode(status1)!.adcNotificationRate, isNull);
+    expect(DeviceStatus.decode(status2)!.adcNotificationRate, isNull);
     expect(DeviceStatus.decode(Uint8List(0)), isNull);
     expect(RawImuSample.decode(Uint8List(0)), isNull);
     expect(RawImuSample.decode(Uint8List(20)..[0] = 9), isNull);

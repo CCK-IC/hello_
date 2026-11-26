@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'protocol.dart';
+
 class BatchAssemblyResult {
   final Uint8List? frame;
   final bool invalid;
@@ -99,7 +101,7 @@ class BleBatchAssembler {
   }
 
   static bool _validFrameLength(int kind, int total) {
-    if (kind == 4) return total == 108;
+    if (kind == 4) return DeviceStatus.isV3FrameLength(total);
     final rowSize = switch (kind) { 1 => 48, 2 => 44, 3 => 40, _ => 0 };
     return rowSize != 0 &&
         total > 28 &&

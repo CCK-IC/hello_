@@ -1,10 +1,19 @@
 # BLE project handoff
 
-Last updated: 2026-11-24. Update this file after each meaningful test or change,
+Last updated: 2026-11-26. Update this file after each meaningful test or change,
 including the result, relevant commit, and remaining work. Share the updated
 file through the repository's normal Git workflow so other checkouts receive it.
 
 The app and sensor firmware are separate repositories. Mac and Windows also use separate checkouts: verify each checkout's repository, branch, commits, and local changes before transferring work. A commit in one checkout does not automatically update another.
+
+## ADC notification telemetry, 2026-11-26
+
+- App **1.2.0+5** reports separate IMU and ADC notification rates in
+  packets per second. Firmware **1.5.0** provides the ADC rate through a
+  112-byte v3 status frame. The app also accepts 108-byte status frames
+  and displays the ADC rate as unavailable for those devices.
+- The C-generated fixture covers the new frame and MTU 23 reassembly.
+  [Status format](docs/BATCH_PROTOCOL_V3.md#status-frame-kind4)
 
 ## ADC and fused frequency analysis, 2026-11-24
 

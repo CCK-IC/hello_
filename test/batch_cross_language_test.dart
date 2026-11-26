@@ -96,6 +96,7 @@ void main() {
             expect(s.requestedRate, e['requestedRateHz']);
             expect(s.actualSensorRate, e['actualRateHz']);
             expect(s.notificationRate, e['notificationRateHz']);
+            expect(s.adcNotificationRate, e['adcNotificationRateHz']);
             expect(s.batteryMilliVolts, e['batteryMv']);
             expect(s.attMtu, e['mtu']);
             expect(s.boardId, e['boardId']);

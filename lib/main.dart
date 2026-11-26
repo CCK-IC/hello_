@@ -1071,6 +1071,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
   Widget _buildTelemetry() {
     final status = _latestStatus;
+    final adcNotificationRate = status?.adcNotificationRate;
     return _SectionCard(children: [
       const _SectionHeading("Device telemetry"),
       const SizedBox(height: 8),
@@ -1089,7 +1090,10 @@ class _BleImuAppState extends State<BleImuApp> {
             Text(
                 "Battery: ${status.batteryMilliVolts} mV (${status.batteryPercent}%)"),
             Text("Sensor sample rate: ${status.actualSensorRate} Hz"),
-            Text("BLE notification rate: ${status.notificationRate} Hz"),
+            Text("IMU notification rate: ${status.notificationRate} packets/s"),
+            Text(adcNotificationRate == null
+                ? "ADC notification rate: Unavailable"
+                : "ADC notification rate: $adcNotificationRate packets/s"),
             Text("Uptime: ${(status.uptimeMs / 1000).toStringAsFixed(1)} s"),
             Text("Dropped notifications: ${status.droppedNotifications}"),
             Text("Discarded sensor samples: ${status.bufferDroppedSamples}"),

@@ -20,6 +20,9 @@ do not establish that the previously observed disconnects are fixed.
 App **1.1.1+3** adds ADC percussion and synchronized ADC + IMU frequency
 analysis, with live results, history plots, and frequency CSV export.
 
+App **1.2.0+5** displays separate IMU and ADC notification rates. Firmware
+**1.5.0** provides the ADC rate. Earlier firmware shows that rate as unavailable.
+
 ## Run the app
 
 You need a BLE-capable host and a powered sensor running firmware that implements
@@ -198,7 +201,9 @@ local history/analysis pipeline uses only slot 0.
 Sensor frames have a 28-byte header and 1–8 rows containing both slots. Each
 sample reconstructs its original sequence and device timestamp from its slot's
 base and per-row deltas; times are not fabricated from a nominal rate. Status
-is a current snapshot with two 52-byte slots and a 4-byte header (108 bytes).
+has a 108-byte base with two 52-byte slots and a 4-byte header. Firmware
+1.5.0 appends four bytes for per-slot ADC notification rates. App 1.2.0
+accepts both status frame lengths.
 Malformed frames are rejected before any sample is emitted.
 
 Preferred ATT MTU is **247**, allowing 244 value bytes. A raw frame fits **four

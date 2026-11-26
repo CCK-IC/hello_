@@ -255,6 +255,11 @@ class RawImuSample {
 
 /// Device Status Packet Data
 class DeviceStatus {
+  static const _legacyV3Length = 108;
+  static const _extendedV3Length = 112;
+  static const _v3FeatureFlags = 0x0003;
+  static const _v3AdcNotificationRateFlag = 0x0004;
+
   final int version;
   final int gloveId;
   final int bufferDroppedSamples;
@@ -271,6 +276,9 @@ class DeviceStatus {
   final int requestedRate;
   final int actualSensorRate;
   final int notificationRate;
+
+  /// Accepted ADC notification packets per second, if reported by the device.
+  final int? adcNotificationRate;
   final int batteryMilliVolts;
   final int batteryPercent;
   final int attMtu;
@@ -296,6 +304,7 @@ class DeviceStatus {
     required this.requestedRate,
     required this.actualSensorRate,
     required this.notificationRate,
+    this.adcNotificationRate,
     required this.batteryMilliVolts,
     required this.batteryPercent,
     required this.attMtu,
@@ -334,25 +343,42 @@ class DeviceStatus {
     return null;
   }
 
+  static bool isV3FrameLength(int length) =>
+      length == _legacyV3Length || length == _extendedV3Length;
+
   static List<DeviceStatus>? decodeAll(Uint8List bytes) {
     if (bytes.isNotEmpty && bytes[0] == 3) {
-      if (bytes.length != 108 ||
+      if (!isV3FrameLength(bytes.length) ||
           bytes[1] != 4 ||
           !_validPresence(bytes[2]) ||
           bytes[3] != 1) {
         return null;
       }
       final data = ByteData.sublistView(bytes);
+      final extended = bytes.length == _extendedV3Length;
+      var hasAdcNotificationRate = false;
       // Validate both slots before returning either status.
       for (var glove = 0; glove < 2; glove++) {
         final offset = 4 + glove * 52;
+        final adcRate = extended
+            ? data.getUint16(_legacyV3Length + glove * 2, Endian.little)
+            : 0;
         if ((bytes[2] & (1 << glove)) == 0) {
-          if (!_allZero(bytes, offset, offset + 52)) return null;
-        } else if (bytes[offset + 16] > 100 ||
-            data.getUint16(offset + 22, Endian.little) != 3) {
+          if (!_allZero(bytes, offset, offset + 52) || adcRate != 0) {
+            return null;
+          }
+          continue;
+        }
+        if (bytes[offset + 16] > 100) return null;
+        final featureFlags = data.getUint16(offset + 22, Endian.little);
+        if (extended &&
+            featureFlags == (_v3FeatureFlags | _v3AdcNotificationRateFlag)) {
+          hasAdcNotificationRate = true;
+        } else if (featureFlags != _v3FeatureFlags || adcRate != 0) {
           return null;
         }
       }
+      if (extended && !hasAdcNotificationRate) return null;
       return [
         for (var glove = 0; glove < 2; glove++)
           if ((bytes[2] & (1 << glove)) != 0) _decodeV3Slot(data, glove)
@@ -365,6 +391,7 @@ class DeviceStatus {
   static DeviceStatus _decodeV3Slot(ByteData data, int glove) {
     final o = 4 + glove * 52;
     final board = data.getUint8(o + 14);
+    final featureFlags = data.getUint16(o + 22, Endian.little);
     return DeviceStatus(
       version: 3,
       gloveId: glove,
@@ -378,6 +405,9 @@ class DeviceStatus {
       requestedRate: data.getUint16(o + 4, Endian.little),
       actualSensorRate: data.getUint16(o + 6, Endian.little),
       notificationRate: data.getUint16(o + 8, Endian.little),
+      adcNotificationRate: (featureFlags & _v3AdcNotificationRateFlag) != 0
+          ? data.getUint16(_legacyV3Length + glove * 2, Endian.little)
+          : null,
       batteryMilliVolts: data.getUint16(o + 10, Endian.little),
       attMtu: data.getUint16(o + 12, Endian.little),
       imuState: data.getUint8(o + 15),
@@ -386,7 +416,7 @@ class DeviceStatus {
       firmwareVersion:
           '${data.getUint8(o + 18)}.${data.getUint8(o + 19)}.${data.getUint8(o + 20)}',
       phy: data.getUint8(o + 21),
-      featureFlags: data.getUint16(o + 22, Endian.little),
+      featureFlags: featureFlags,
       freeHeap: data.getUint32(o + 24, Endian.little),
       droppedNotifications: data.getUint32(o + 28, Endian.little),
       fifoRecoveries: data.getUint32(o + 32, Endian.little),

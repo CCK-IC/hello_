@@ -11,6 +11,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:universal_ble/universal_ble.dart';
 
+import 'batch_test_fixtures.dart' show statusFrame;
+
 const _deviceId = 'aa:bb:cc:dd:ee:ff';
 const _deviceName = 'XIAO-IMU-RAW Test';
 
@@ -547,6 +549,31 @@ void main() {
     }
     await tester.pumpWidget(const SizedBox.shrink());
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('telemetry shows separate IMU and ADC notification rates',
+      (tester) async {
+    final ble = _FakeBlePlatform();
+    await _connectDashboard(tester, ble);
+
+    _emit(ble, BleUuids.statusChar, statusFrame());
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('IMU notification rate: 50 packets/s'), findsOneWidget);
+    expect(find.text('ADC notification rate: Unavailable'), findsOneWidget);
+
+    final parts = _fragments(statusFrame(adcNotificationRates: {0: 25}), 1);
+    _emit(ble, BleUuids.statusChar, parts.first);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('ADC notification rate: Unavailable'), findsOneWidget);
+    _emit(ble, BleUuids.statusChar, parts.last);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('IMU notification rate: 50 packets/s'), findsOneWidget);
+    expect(find.text('ADC notification rate: 25 packets/s'), findsOneWidget);
+
+    _emit(ble, BleUuids.statusChar, statusFrame(adcNotificationRates: {0: 0}));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('ADC notification rate: 0 packets/s'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('interleaved raw and AUX fragments emit only complete batches',
