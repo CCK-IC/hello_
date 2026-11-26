@@ -23,6 +23,9 @@ analysis, with live results, history plots, and frequency CSV export.
 App **1.2.0+5** displays separate IMU and ADC notification rates. Firmware
 **1.5.0** provides the ADC rate. Earlier firmware shows that rate as unavailable.
 
+App **1.2.1+6** improves percussion readout consistency, defaults to angular
+velocity, and keeps analysis settings across visits to the dashboard.
+
 ## Run the app
 
 You need a BLE-capable host and a powered sensor running firmware that implements
@@ -95,20 +98,30 @@ screen-reader labels.
 1. Enable **IMU raw** for motion estimates and **Auxiliary sensor** in **BLE
    subscriptions** for ADC and fused estimates. Open **Analyze IMU data** from
    the app bar.
-2. Select **Acceleration** or **Angular velocity** and choose the **ADC analysis
-   channel** for your sensor input. Collect several seconds of movement. ADC and
-   fused results use the same configured bands as the original IMU results.
+2. Analysis starts with **Angular velocity**. You can switch to
+   **Acceleration**. Choose the **ADC analysis channel** for your sensor input
+   and collect several seconds of movement. ADC and fused results use the same
+   configured bands as the original IMU results.
 3. Adjust the ranges under **Frequency bands** and select **Apply bands**. The
    defaults are **1–5 Hz** for percussion and **6.5–10 Hz** for vibration.
 4. Use **Frequency history** to show any of the five series. Set a display
    window from 10 seconds to 5 minutes and a history buffer from 1 to 60 minutes.
+
+Applied choices are kept when you return to the dashboard and reopen analysis
+during the same app session.
+
+**IMU percussion** uses the motion spectrum. With **Acceleration** selected,
+repeated motion can confirm a weak spectral peak. After a short sample gap,
+percussion can resume with as little as two seconds of fresh continuous data
+if the segment is long enough to resolve the selected band.
 
 **ADC percussion** reports the typical rate between detected taps within the
 percussion band. Tap spacing can vary, and pauses longer than the band allows
 are left out. For noisy ADC signals, the app smooths short fluctuations and
 waits for a release before counting another tap. **Fused percussion** estimates
 cadence from ADC taps that match IMU impacts, allowing a consistent short lead
-or lag. **Fused vibration**
+or lag. It also checks brief groups of IMU changes and IMU level peaks when
+a sharp rebound obscures the contact in the raw impact signal. **Fused vibration**
 searches the IMU spectrum during sustained ADC highs and tolerates brief dips.
 The automatic gate uses a recent low ADC reading as a reference. If the ADC is
 already high, open **Vibration gate** and set a minimum ADC count for the

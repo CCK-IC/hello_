@@ -276,6 +276,7 @@ class _BleImuAppState extends State<BleImuApp> {
   };
 
   final List<RawImuHistoryPoint> _rawHistory = [];
+  final _analysisSettings = ImuAnalysisSettings();
   final StreamController<RawImuHistoryPoint?> _analysisSamples =
       StreamController<RawImuHistoryPoint?>.broadcast(sync: true);
   final _analysisAdcSamples =
@@ -956,6 +957,7 @@ class _BleImuAppState extends State<BleImuApp> {
                   builder: (_) => ImuAnalysisPage(
                     samples: _analysisSamples.stream,
                     adcSamples: _analysisAdcSamples.stream,
+                    settings: _analysisSettings,
                   ),
                 ),
               ),

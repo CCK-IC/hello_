@@ -9,21 +9,22 @@ import 'package:ble_imu_visualizer/widgets/imu_analysis_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-RawImuHistoryPoint sample(int index, DateTime start) {
-  final value = (1000 * math.sin(2 * math.pi * 2 * index / 25)).round();
+RawImuHistoryPoint sample(int index, DateTime start, {int? timestampMs}) {
+  final ms = timestampMs ?? index * 40;
+  final value = (1000 * math.sin(2 * math.pi * 2 * ms / 1000)).round();
   return RawImuHistoryPoint(
-    receivedAt: start.add(Duration(milliseconds: index * 40)),
+    receivedAt: start.add(Duration(milliseconds: ms)),
     sample: RawImuSample(
       version: 1,
       flags: const RawImuFlags(7, 1),
       accelerometerRangeCode: 0,
       gyroscopeRangeCode: 0,
       sequence: index,
-      timestampMs: index * 40,
+      timestampMs: ms,
       accelerometerX: value,
       accelerometerY: 0,
       accelerometerZ: 16384,
-      gyroscopeX: 0,
+      gyroscopeX: value,
       gyroscopeY: 0,
       gyroscopeZ: 0,
     ),
@@ -31,13 +32,19 @@ RawImuHistoryPoint sample(int index, DateTime start) {
 }
 
 void main() {
-  testWidgets('initial band controls match the analysis defaults',
+  testWidgets('initial controls select angular velocity and the default bands',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 1600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final samples = StreamController<RawImuHistoryPoint?>(sync: true);
     await tester.pumpWidget(
         MaterialApp(home: ImuAnalysisPage(samples: samples.stream)));
+    expect(
+        tester
+            .widget<ChoiceChip>(
+                find.widgetWithText(ChoiceChip, 'Angular velocity'))
+            .selected,
+        isTrue);
     for (final entry in {
       'Percussion min': 1.0,
       'Percussion max': 5.0,
@@ -48,6 +55,48 @@ void main() {
           tester.widget<TextField>(find.widgetWithText(TextField, entry.key));
       expect(double.parse(field.controller!.text), entry.value);
     }
+    await tester.pumpWidget(const SizedBox());
+    unawaited(samples.close());
+  });
+
+  testWidgets('percussion recovers from a short sample gap on the live page',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final samples = StreamController<RawImuHistoryPoint?>(sync: true);
+    final start = DateTime.utc(2026);
+    var now = start;
+    await tester.pumpWidget(MaterialApp(
+      home: ImuAnalysisPage(samples: samples.stream, clock: () => now),
+    ));
+    final first = find.byKey(const ValueKey('frequency-result-0'));
+    final second = find.byKey(const ValueKey('frequency-result-1'));
+    final gapMessage = find.textContaining('gap in the sample window');
+    final points = [
+      for (var i = 0; i <= 186; i++)
+        if (i != 70 && i != 71)
+          sample(i, start, timestampMs: (1000 * i / 45).round()),
+    ];
+    const initialCount = 93;
+    now = points[initialCount - 1].receivedAt;
+    for (final point in points.take(initialCount)) {
+      samples.add(point);
+    }
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.descendant(of: first, matching: gapMessage), findsOneWidget);
+
+    now = points.last.receivedAt;
+    for (final point in points.skip(initialCount)) {
+      samples.add(point);
+    }
+    await tester.pump(const Duration(seconds: 1));
+    expect(
+        find.descendant(
+            of: first,
+            matching:
+                find.textContaining(RegExp(r'^(1\.9[5-9]|2\.0[0-5]) Hz$'))),
+        findsOneWidget);
+    expect(find.descendant(of: second, matching: gapMessage), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
     unawaited(samples.close());
   });
@@ -168,6 +217,8 @@ void main() {
         saveCsv: (csv, _, __) async => exports.add(csv),
       ),
     ));
+    await tester.tap(find.widgetWithText(ChoiceChip, 'Acceleration'));
+    await tester.pump();
     for (var i = 0; i < 151; i++) {
       samples.add(sample(i, start));
     }
@@ -256,9 +307,11 @@ void main() {
     await tester.pump();
     expect(
         find.textContaining('Enter positive frequency ranges'), findsOneWidget);
-    await tester.tap(find.text('Angular velocity'));
+    final acceleration = find.widgetWithText(ChoiceChip, 'Acceleration');
+    await tester.ensureVisible(acceleration);
+    await tester.tap(acceleration);
     await tester.pump();
-    expect(find.text('Angular velocity'), findsOneWidget);
+    expect(tester.widget<ChoiceChip>(acceleration).selected, isTrue);
     await tester.pumpWidget(const SizedBox());
     unawaited(samples.close());
   });

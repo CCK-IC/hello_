@@ -47,6 +47,70 @@ List<RawImuHistoryPoint> signal(
         ),
     ];
 
+List<RawImuHistoryPoint> impactsInMotion({
+  int stepMs = 10,
+  double? stopAfterSeconds,
+  bool fasterImpacts = false,
+}) {
+  const cadence = 2.875;
+  final points = <RawImuHistoryPoint>[];
+  final noise =
+      fasterImpacts ? 0.105 : (stopAfterSeconds == null ? 0.095 : 0.085);
+  final impactHz = fasterImpacts ? 2 * cadence : cadence;
+  for (var ms = 0; ms <= 8000; ms += stepMs) {
+    final t = ms / 1000;
+    // Off-cadence motion raises the lower-band noise floor. The stronger
+    // 17 Hz motion represents fixture ringing on a perpendicular axis.
+    final otherMotion =
+        [9, 12, 15, 18, 26, 29, 32, 35, 38].fold(0.0, (sum, bin) {
+      return sum + math.sin(2 * math.pi * bin * t / 8 + 0.13 * bin * bin);
+    });
+    final phase = (t * impactHz) % 1;
+    final impact = stopAfterSeconds == null || t <= stopAfterSeconds
+        ? 0.6 * math.exp(-phase / 0.1)
+        : 0.0;
+    final lateral =
+        fasterImpacts ? 0.12 * math.sin(2 * math.pi * cadence * t) : 0.0;
+    points.add(point(
+      ms,
+      ms ~/ stepMs,
+      noise * otherMotion + 0.26 * math.sin(2 * math.pi * 17 * t) + lateral,
+      0,
+      1 + impact,
+    ));
+  }
+  return points;
+}
+
+List<RawImuHistoryPoint> gappedSignal({
+  int stepMs = 10,
+  int gapMs = 40,
+  int sequenceStep = 1,
+  int suffixMs = 2400,
+  double afterHz = 2,
+  bool invalidBeforeGap = false,
+}) {
+  const firstAfterGap = 200;
+  final points = <RawImuHistoryPoint>[];
+  for (var i = 0; i <= firstAfterGap + suffixMs ~/ stepMs; i++) {
+    final afterGap = i >= firstAfterGap;
+    final ms = i * stepMs + (afterGap ? gapMs - stepMs : 0);
+    final t = ms / 1000;
+    final low = math.sin(2 * math.pi * (afterGap ? afterHz : 4) * t);
+    points.add(point(
+      ms,
+      i + (afterGap ? sequenceStep - 1 : 0),
+      0.3 * low,
+      0.2 * math.sin(2 * math.pi * 8 * t),
+      1,
+      sampleValid: !invalidBeforeGap || i != firstAfterGap - 1,
+      gyroX: 20 * low,
+      gyroValid: true,
+    ));
+  }
+  return points;
+}
+
 void main() {
   test('default search bands use the requested frequency ranges', () {
     final result = ImuFrequencyAnalyzer.analyze(signal());
@@ -87,6 +151,67 @@ void main() {
     expect(result.bands.every((b) => b.peakHz == null), isTrue);
   });
 
+  test('recovers only percussion once two seconds of fresh samples arrive', () {
+    final tooSoon = ImuFrequencyAnalyzer.analyze(gappedSignal(suffixMs: 1990));
+    expect(tooSoon.error, contains('gap'));
+    expect(tooSoon.bands.every((band) => band.peakHz == null), isTrue);
+
+    final result = ImuFrequencyAnalyzer.analyze(gappedSignal(suffixMs: 2000));
+    expect(result.error, isNull);
+    expect(result.duration, const Duration(seconds: 2));
+    expect(result.sampleCount, 201);
+    expect(result.sampleRateHz, closeTo(100, 0.1));
+    expect(result.bands[0].peakHz, closeTo(2, 0.05));
+    expect(result.bands[1].peakHz, isNull);
+    expect(result.bands[1].unavailableReason, contains('gap'));
+  });
+
+  test('recovers angular-velocity percussion after a 45 Hz packet gap', () {
+    final points = gappedSignal(stepMs: 22, gapMs: 66, sequenceStep: 3);
+    final band = [ImuFrequencyAnalyzer.defaultBands.first];
+    final result = ImuFrequencyAnalyzer.analyze(points,
+        bands: band, percussionBandIndex: 0, sensor: RawSensorType.gyroscope);
+    expect(result.error, isNull);
+    expect(result.sampleRateHz, closeTo(45.45, 0.1));
+    expect(result.bands.single.peakHz, closeTo(2, 0.05));
+    expect(
+        ImuFrequencyAnalyzer.analyze(points,
+                bands: band, sensor: RawSensorType.gyroscope)
+            .error,
+        contains('gap'));
+  });
+
+  test('resolves a short-suffix peak near the band edge', () {
+    final result = ImuFrequencyAnalyzer.analyze(
+        gappedSignal(suffixMs: 2020, afterHz: 1.05));
+    expect(result.bands.first.peakHz, closeTo(1.05, 0.05));
+    expect(
+        ImuFrequencyAnalyzer.analyze(
+                gappedSignal(suffixMs: 2020, afterHz: 0.85))
+            .bands
+            .first
+            .peakHz,
+        isNull);
+  });
+
+  test('keeps long gaps, inconsistent sequences and invalid windows rejected',
+      () {
+    for (final points in [
+      gappedSignal(gapMs: 60),
+      gappedSignal(sequenceStep: -1),
+      gappedSignal(sequenceStep: 12),
+      gappedSignal(gapMs: 29, sequenceStep: 4),
+    ]) {
+      final result = ImuFrequencyAnalyzer.analyze(points);
+      expect(result.error, contains('gap'));
+      expect(result.bands.every((band) => band.peakHz == null), isTrue);
+    }
+    final result =
+        ImuFrequencyAnalyzer.analyze(gappedSignal(invalidBeforeGap: true));
+    expect(result.error, contains('invalid'));
+    expect(result.bands.every((band) => band.peakHz == null), isTrue);
+  });
+
   test('a small allowed gap does not inflate the measured sample rate', () {
     final points = signal();
     points.removeAt(250);
@@ -124,6 +249,40 @@ void main() {
     ];
     final result = ImuFrequencyAnalyzer.analyze(points);
     expect(result.bands.every((band) => band.peakHz == null), isTrue);
+  });
+
+  test('acceleration recurrence recovers a marginal impact peak', () {
+    final band = [ImuFrequencyAnalyzer.defaultBands.first];
+    for (final stepMs in [10, 22]) {
+      final points = impactsInMotion(stepMs: stepMs);
+      expect(
+          ImuFrequencyAnalyzer.analyze(points, bands: band).bands.single.peakHz,
+          isNull);
+      expect(ImuFrequencyAnalyzer.analyze(points).bands.first.peakHz,
+          closeTo(2.875, 0.125));
+      final explicit = ImuFrequencyAnalyzer.analyze(points,
+          bands: band, percussionBandIndex: 0);
+      expect(explicit.bands.single.peakHz, closeTo(2.875, 0.125));
+    }
+  });
+
+  test('an earlier cadence or a multiple of a faster period cannot corroborate',
+      () {
+    final band = [ImuFrequencyAnalyzer.defaultBands.first];
+    for (final points in [
+      impactsInMotion(stopAfterSeconds: 5.8),
+      impactsInMotion(fasterImpacts: true),
+    ]) {
+      final spectral = ImuFrequencyAnalyzer.analyze(points, bands: band);
+      expect(spectral.bands.single.peakHz, isNull);
+      expect(ImuFrequencyAnalyzer.analyze(points).bands.first.peakHz, isNull);
+    }
+  });
+
+  test('does not corroborate from a previous device timestamp epoch', () {
+    final points = impactsInMotion()..addAll(signal().take(80));
+    final result = ImuFrequencyAnalyzer.analyze(points);
+    expect(result.bands.first.peakHz, isNull);
   });
 
   test('analyzes gyroscope axes and validates the selected sensor', () {

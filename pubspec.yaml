@@ -1,7 +1,7 @@
 name: ble_imu_visualizer
 description: High-performance BLE IMU Monitor & 3D Attitude Visualizer
 publish_to: "none"
-version: 1.2.0+5
+version: 1.2.1+6
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

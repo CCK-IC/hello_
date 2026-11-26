@@ -17,6 +17,9 @@ const _deviceId = 'aa:bb:cc:dd:ee:ff';
 const _deviceName = 'XIAO-IMU-RAW Test';
 
 class _FakeBlePlatform extends UniversalBlePlatform {
+  _FakeBlePlatform({this.scanResult});
+
+  final BleDevice? scanResult;
   bool connected = false;
   bool rejectAdcRate = false;
   final subscriptions = <String>[];
@@ -26,7 +29,9 @@ class _FakeBlePlatform extends UniversalBlePlatform {
 
   @override
   Future<void> startScan(
-      {ScanFilter? scanFilter, PlatformConfig? platformConfig}) async {}
+      {ScanFilter? scanFilter, PlatformConfig? platformConfig}) async {
+    if (scanResult case final device?) updateScanResult(device);
+  }
 
   @override
   Future<void> stopScan() async {}
@@ -166,8 +171,10 @@ Future<void> _connectDashboard(WidgetTester tester, _FakeBlePlatform ble,
   await tester.pumpWidget(MaterialApp(home: BleImuApp(saveCsv: saveCsv)));
   await tester.tap(find.byIcon(Icons.search));
   await tester.pump();
-  ble.updateScanResult(BleDevice(deviceId: _deviceId, name: _deviceName));
-  await tester.pump();
+  if (ble.scanResult == null) {
+    ble.updateScanResult(BleDevice(deviceId: _deviceId, name: _deviceName));
+    await tester.pump();
+  }
   await tester.tap(find.text('CONNECT'));
   await tester.pumpAndSettle();
 }
@@ -399,7 +406,7 @@ void main() {
         ..setUint8(1, 7)
         ..setUint16(2, i, Endian.little)
         ..setUint32(4, i * 40, Endian.little)
-        ..setInt16(8, (1000 * math.sin(2 * math.pi * 2 * i / 25)).round(),
+        ..setInt16(14, (1000 * math.sin(2 * math.pi * 2 * i / 25)).round(),
             Endian.little);
       ble.updateCharacteristicValue(
           _deviceId, BleUuids.rawImuChar, data.buffer.asUint8List(), null);
@@ -416,6 +423,113 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('analysis settings survive returning to the dashboard',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 2400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await _connectDashboard(
+      tester,
+      _FakeBlePlatform(
+          scanResult: BleDevice(deviceId: _deviceId, name: _deviceName)),
+    );
+
+    Future<void> openAnalysis() async {
+      await tester.tap(find.byTooltip('Analyze IMU data'));
+      await tester.pumpAndSettle();
+    }
+
+    Finder labeledOption(String label) => find.byWidgetPredicate(
+        (widget) => widget is Semantics && widget.properties.label == label);
+
+    Finder dropdown(String label) => find.descendant(
+        of: labeledOption(label), matching: find.byType(DropdownButton<int>));
+
+    Future<void> choose(String label, int value) async {
+      tester.widget<DropdownButton<int>>(dropdown(label)).onChanged!(value);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> setGate(String counts) async {
+      final gate = find.text('Vibration gate: Automatic');
+      await tester.ensureVisible(gate);
+      await tester.tap(gate);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+          find.widgetWithText(TextFormField, 'ADC high threshold (counts)'),
+          counts);
+      await tester.tap(find.text('Apply gate'));
+      await tester.pumpAndSettle();
+    }
+
+    await openAnalysis();
+    final angularVelocity = find.widgetWithText(ChoiceChip, 'Angular velocity');
+    final acceleration = find.widgetWithText(ChoiceChip, 'Acceleration');
+    expect(tester.widget<ChoiceChip>(angularVelocity).selected, isTrue);
+    await tester.tap(acceleration);
+    await tester.pump();
+
+    const bands = {
+      'Percussion min': '1.5',
+      'Percussion max': '4.5',
+      'Vibration min': '6.75',
+      'Vibration max': '9.75',
+    };
+    for (final entry in bands.entries) {
+      await tester.enterText(
+          find.widgetWithText(TextField, entry.key), entry.value);
+    }
+    await tester.tap(find.text('Apply bands'));
+    await tester.pump();
+    await setGate('700');
+    await choose('ADC analysis channel', 1);
+    await setGate('1200');
+    final hiddenSeries = find.widgetWithText(FilterChip, 'Fused vibration');
+    await tester.ensureVisible(hiddenSeries);
+    await tester.tap(hiddenSeries);
+    await tester.pump();
+    await choose('Display window', 60);
+    await choose('History buffer', 30);
+    await choose('Recording duration', -1);
+    await tester.enterText(
+        find.widgetWithText(TextFormField, 'Seconds (1–3600)'), '37');
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text(BleImuMonitor.title), findsOneWidget);
+    await openAnalysis();
+
+    expect(tester.widget<ChoiceChip>(acceleration).selected, isTrue);
+    for (final entry in bands.entries) {
+      final field =
+          tester.widget<TextField>(find.widgetWithText(TextField, entry.key));
+      expect(field.controller!.text, entry.value);
+    }
+    expect(find.text('1.5–4.5 Hz'), findsWidgets);
+    expect(find.text('6.75–9.75 Hz'), findsWidgets);
+    expect(tester.widget<FilterChip>(hiddenSeries).selected, isFalse);
+    expect(
+        tester
+            .widget<DropdownButton<int>>(dropdown('ADC analysis channel'))
+            .value,
+        1);
+    expect(find.text('Vibration gate: ≥ 1200 counts'), findsOneWidget);
+    await choose('ADC analysis channel', 0);
+    expect(find.text('Vibration gate: ≥ 700 counts'), findsOneWidget);
+    expect(tester.widget<DropdownButton<int>>(dropdown('Display window')).value,
+        60);
+    expect(tester.widget<DropdownButton<int>>(dropdown('History buffer')).value,
+        30);
+    expect(
+        tester
+            .widget<Semantics>(labeledOption('Recording duration'))
+            .properties
+            .value,
+        '37 seconds');
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets(
@@ -747,9 +861,12 @@ void main() {
           final value = signal((base + i) * periodMs);
           if (kind == 1) {
             final offset = 28 + i * 48 + 4;
-            data.setInt16(offset, value, Endian.little);
+            data.setInt16(offset, 0, Endian.little);
             data.setInt16(offset + 2, 0, Endian.little);
             data.setInt16(offset + 4, 16384, Endian.little);
+            data.setInt16(offset + 6, value, Endian.little);
+            data.setInt16(offset + 8, 0, Endian.little);
+            data.setInt16(offset + 10, 0, Endian.little);
           } else {
             final offset = 28 + i * 40 + 4;
             data.setInt16(offset, 500, Endian.little);

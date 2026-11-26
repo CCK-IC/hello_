@@ -46,11 +46,12 @@ RawImuHistoryPoint _imuPoint(int ms, double x) => RawImuHistoryPoint(
   int Function(int) adc,
   double Function(int) imu, {
   int endMs = 5000,
+  int imuStepMs = 20,
   int? highThreshold,
 }) =>
     AdcFrequencyAnalyzer.analyze(
       [for (var ms = 0; ms <= endMs; ms += 10) _adcPoint(ms, adc(ms))],
-      [for (var ms = 0; ms <= endMs; ms += 20) _imuPoint(ms, imu(ms))],
+      [for (var ms = 0; ms <= endMs; ms += imuStepMs) _imuPoint(ms, imu(ms))],
       bands: _bands,
       sensor: RawSensorType.accelerometer,
       highThreshold: highThreshold,
@@ -58,6 +59,9 @@ RawImuHistoryPoint _imuPoint(int ms, double x) => RawImuHistoryPoint(
 
 int _tapCounts(int ms, List<int> taps) =>
     taps.any((tap) => (ms - tap).abs() <= 10) ? 900 : 200;
+
+int _noisyTapCounts(int ms, List<int> taps) =>
+    _tapCounts(ms, taps) + (ms ~/ 10 * 17) % 43;
 
 double _impacts(int ms, List<int> times) {
   final distance = times.map((time) => (ms - time).abs()).reduce(math.min);
@@ -94,6 +98,103 @@ void main() {
     expect(hold.adc.bands.first.peakHz, isNull);
     expect(hold.fused.bands.first.peakHz, isNull);
     expect(hold.fused.bands.last.peakHz, closeTo(8, 0.25));
+  });
+
+  test('fuses distributed IMU motion on noisy contacts with sharp rebounds',
+      () {
+    final taps = [for (var i = 0; i < 9; i++) 300 + i * 350];
+    double motion(int ms, int lagMs) {
+      var result = 0.0;
+      for (var i = 0; i < taps.length; i++) {
+        final offset = ms - taps[i] - lagMs - (i.isEven ? 10 : 0);
+        // A broad response with several comparable changes and a narrow,
+        // stronger rebound on most cycles.
+        result += 0.33 * math.exp(-0.5 * math.pow(offset / 29, 2));
+        if (i % 3 != 2 && offset == 140) result -= 0.30;
+      }
+      return result;
+    }
+
+    final result = _analyze(
+      (ms) => _noisyTapCounts(ms, taps),
+      (ms) => motion(ms, 20),
+      imuStepMs: 10,
+      endMs: 3300,
+    );
+    expect(result.adc.bands.single.peakHz, closeTo(1000 / 350, 0.05));
+    expect(result.fused.bands.first.peakHz, closeTo(1000 / 350, 0.05));
+
+    final displaced = _analyze(
+      (ms) => _noisyTapCounts(ms, taps),
+      (ms) => motion(ms, 145),
+      imuStepMs: 10,
+      endMs: 3300,
+    );
+    expect(displaced.fused.bands.first.peakHz, isNull);
+  });
+
+  test('noisy contacts reject half and double IMU cadence', () {
+    final taps = [for (var i = 0; i < 7; i++) 500 + i * 500];
+    for (final impacts in [
+      [for (var i = 0; i < taps.length; i += 2) taps[i]],
+      [for (var i = 0; i < 2 * taps.length - 1; i++) 500 + i * 250],
+    ]) {
+      final result = _analyze(
+        (ms) => _noisyTapCounts(ms, taps),
+        (ms) => _impacts(ms, impacts),
+        imuStepMs: 10,
+        endMs: 3750,
+      );
+      expect(result.adc.bands.single.peakHz, closeTo(2, 0.03));
+      expect(result.fused.bands.first.peakHz, isNull,
+          reason: 'IMU impacts at ${impacts[1] - impacts[0]} ms intervals');
+    }
+    final alternatingPolarity = _analyze(
+      (ms) => _noisyTapCounts(ms, taps),
+      (ms) =>
+          _impacts(ms, taps) -
+          _impacts(ms, [for (final tap in taps.take(6)) tap + 250]),
+      imuStepMs: 22,
+      endMs: 3750,
+    );
+    expect(alternatingPolarity.fused.bands.first.peakHz, isNull);
+  });
+
+  test('uses aligned IMU level peaks when change peaks flank the contact', () {
+    final taps = [for (var i = 0; i < 8; i++) 500 + i * 500];
+    final result = _analyze(
+      (ms) => _noisyTapCounts(ms, taps),
+      (ms) => taps.any((tap) => (ms - tap).abs() < 120) ? 0.35 : 0,
+      imuStepMs: 22,
+    );
+    expect(result.adc.bands.single.peakHz, closeTo(2, 0.03));
+    expect(result.fused.bands.first.peakHz, closeTo(2, 0.03));
+  });
+
+  test('missing IMU matches do not count as longer tap intervals', () {
+    final taps = [for (var i = 0; i < 9; i++) 400 + i * 400];
+    final impacts = [
+      for (final i in [0, 1, 3, 4, 6, 8]) taps[i]
+    ];
+    final result = _analyze(
+      (ms) => _noisyTapCounts(ms, taps),
+      (ms) => _impacts(ms, impacts),
+      imuStepMs: 10,
+      endMs: 3950,
+    );
+    expect(result.adc.bands.single.peakHz, closeTo(2.5, 0.03));
+    expect(result.fused.bands.first.peakHz, closeTo(2.5, 0.03));
+  });
+
+  test('noisy contacts cannot turn IMU idle jitter into impacts', () {
+    final taps = [for (var i = 0; i < 8; i++) 400 + i * 500];
+    final result = _analyze(
+      (ms) => _noisyTapCounts(ms, taps),
+      (ms) => 0.0005 * _impacts(ms, taps),
+      imuStepMs: 10,
+    );
+    expect(result.adc.bands.single.peakHz, closeTo(2, 0.03));
+    expect(result.fused.bands.first.peakHz, isNull);
   });
 
   for (final periodMs in [300, 600]) {

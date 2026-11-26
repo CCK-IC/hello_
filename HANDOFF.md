@@ -15,6 +15,77 @@ The app and sensor firmware are separate repositories. Mac and Windows also use 
 - The C-generated fixture covers the new frame and MTU 23 reassembly.
   [Status format](docs/BATCH_PROTOCOL_V3.md#status-frame-kind4)
 
+## Piston fixture percussion, 2026-11-26
+
+- Analysis opens with **Angular velocity** selected. The dashboard retains
+  applied bands, IMU signal, ADC channel and per-channel gates, plot series,
+  display window, history buffer size, and CSV recording duration across
+  analysis page visits during the app session. The navigation regression
+  passed on the Flutter VM and in Chrome.
+- App patch **1.2.1+6** improves percussion readout consistency. When an
+  acceleration spectral peak is marginal, the analyzer checks for repeated
+  motion at the same period. After a short IMU interruption, percussion can
+  resume with two seconds of continuous samples when the band is resolvable.
+  The usual eight-second window preserves resolution when samples are
+  continuous. The early estimate interpolates between frequency bins.
+- Fused percussion still requires ADC contacts and IMU events at a consistent
+  offset on the device clock. Short groups of IMU changes and IMU level peaks
+  provide additional contact evidence when sharp peaks alone miss a tap.
+  Computing cadence from adjacent corroborated ADC contacts avoids counting an
+  unmatched contact as part of a longer cycle.
+- Validation replays live BLE packets from three runs of `XIAO-IMU-RAW-75F2`
+  mounted on the piston. Two runs used approximately 100 Hz for both IMU and
+  ADC. A third used the app's default 45 Hz IMU request with 100 Hz ADC. The
+  replay uses the app's packet decoders and production frequency analyzers.
+  The fixture had no independent frequency reference in these runs.
+- Comparing one-second readouts after the initial second, the count of readings
+  increased with the patch in each run. All four tested timer offsets showed
+  the same direction of improvement. The idle control produced no percussion
+  readings across the tested offsets.
+
+| IMU capture rate | IMU percussion, old → new | Fused percussion, old → new |
+| --- | ---: | ---: |
+| 100 Hz, run 1 | 42/46 → 46/46 | 39/46 → 46/46 |
+| 100 Hz, run 2 | 46/56 → 54/56 | 53/56 → 55/56 |
+| 45 Hz | 35/46 → 40/46 | 36/46 → 46/46 |
+
+The second run had 29 ms and 40 ms timing stalls near the 7.3-second mark.
+IMU percussion was available again at the 10-second readout, six seconds
+earlier than in the previous version's replay. Across four timer offsets on
+the 45 Hz run, including startup, fixed four- and six-second windows produced
+98 and 142 of 185 readings respectively. The eight-second window with short-gap
+recovery produced 159 of 185 readings.
+
+Verification passed with 154 Flutter VM tests, 62 focused Chrome tests, clean
+static analysis, and a web release build.
+
+### Timing follow-up
+
+- All 12,614 IMU and 15,155 ADC records in the three piston captures had
+  consecutive sequence numbers within each capture. The six unavailable IMU
+  readouts in the 45 Hz replay came from the spectral confidence check, which
+  accepted the spacing of the received samples.
+- At 45 Hz, the piston capture contained 235 intervals of 40 ms, exactly nine
+  samples and 200 ms apart. A live capture on the same C3 running firmware
+  **1.4.3** repeated the pattern 445 times. The 100 Hz FreeRTOS tick makes the
+  acquisition task check every 20 ms at a 45 Hz request. Its 22.2 ms deadline
+  periodically falls after the next check, giving eight 20 ms intervals and
+  one 40 ms interval per 200 ms. The 50 Hz control aligned the deadline with
+  the check and all 2,356 steady-state intervals were 20 ms.
+- The 29 ms and 40 ms intervals in the 100 Hz piston run occurred once, at
+  7.25 and 7.31 seconds. ADC continued through both gaps. The IMU
+  magnetometer flag dropped at 7.20 seconds for about five seconds while
+  acceleration and gyro stayed valid. That matches the firmware's five-second
+  magnetometer retry interval. The synchronous magnetometer read and retry
+  path can postpone the next IMU acquisition. The cause of the magnetometer
+  event needs a coincident firmware log or acquisition timing trace.
+- The later 100 Hz status capture delivered 6,057 IMU records over 68.2 device
+  seconds, averaging 88.8 Hz. All intervals were at most 19 ms and magnetic
+  data stayed valid. In the live 45, 50, and 100 Hz captures, the I²C error
+  counter held at 10 and the notification-drop, queue-drop, and FIFO counters
+  held at zero. Firmware assigns sequences after successful reads, so a
+  contiguous stream can still under-run its requested acquisition rate.
+
 ## ADC and fused frequency analysis, 2026-11-24
 
 - App patch **1.1.1+3** adds standalone ADC percussion and two fused ADC + IMU

@@ -14,6 +14,23 @@ import '../models/imu_frequency_analysis.dart';
 import '../models/raw_imu_history.dart';
 import 'frequency_history_chart.dart';
 
+/// Analysis preferences that the dashboard retains across page visits.
+class ImuAnalysisSettings {
+  RawSensorType _sensor = RawSensorType.gyroscope;
+  List<FrequencyBand> _bands = [
+    FrequencyBand('Percussion band', ImuFrequencyAnalyzer.defaultBands[0].minHz,
+        ImuFrequencyAnalyzer.defaultBands[0].maxHz),
+    FrequencyBand('Vibration band', ImuFrequencyAnalyzer.defaultBands[1].minHz,
+        ImuFrequencyAnalyzer.defaultBands[1].maxHz),
+  ];
+  final _selectedSeries = FrequencySeries.values.toSet();
+  Duration _chartPeriod = const Duration(seconds: 10);
+  Duration _historyRetention = const Duration(minutes: 10);
+  Duration _recordingPeriod = const Duration(seconds: 10);
+  int _adcChannel = 0;
+  final _adcHighThresholds = <int, int>{};
+}
+
 /// Live, session-scoped analysis of one connected glove.
 /// A null event clears the current session.
 class ImuAnalysisPage extends StatefulWidget {
@@ -21,12 +38,16 @@ class ImuAnalysisPage extends StatefulWidget {
     super.key,
     required this.samples,
     this.adcSamples,
+    this.settings,
     this.clock,
     this.saveCsv,
   });
 
   final Stream<RawImuHistoryPoint?> samples;
   final Stream<AdcHistoryPoint?>? adcSamples;
+
+  /// Pass the same instance when opening a new route to retain its settings.
+  final ImuAnalysisSettings? settings;
 
   /// Optional clock for deterministic tests.
   final DateTime Function()? clock;
@@ -46,11 +67,10 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
 
   final _points = <RawImuHistoryPoint>[];
   final _adcPoints = ListQueue<AdcHistoryPoint>();
-  final _frequencyHistory = FrequencyHistory();
+  late final _settings = widget.settings ?? ImuAnalysisSettings();
+  late final _frequencyHistory =
+      FrequencyHistory(retention: _settings._historyRetention);
   final _recordedFrequency = <FrequencyHistoryPoint>[];
-  final _selectedSeries = FrequencySeries.values.toSet();
-  Duration _chartPeriod = const Duration(seconds: 10);
-  Duration _recordingPeriod = const Duration(seconds: 10);
   DateTime? _recordingStartedAt;
   Timer? _recordingTimer;
   bool _recording = false;
@@ -58,21 +78,18 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   RawImuHistoryPoint? _lastLoggedSample;
   AdcHistoryPoint? _lastLoggedAdc;
   bool _adcSeen = false;
-  int _adcChannel = 0;
-  final _adcHighThresholds = <int, int>{};
-  int? get _adcHighThreshold => _adcHighThresholds[_adcChannel];
+  int? get _adcHighThreshold =>
+      _settings._adcHighThresholds[_settings._adcChannel];
   int _adcEpoch = 0;
   bool _gapLogged = false;
-  RawSensorType _sensor = RawSensorType.accelerometer;
-  final _lowerMin = TextEditingController(
-      text: ImuFrequencyAnalyzer.defaultBands[0].minHz.toString());
-  final _lowerMax = TextEditingController(
-      text: ImuFrequencyAnalyzer.defaultBands[0].maxHz.toString());
-  final _upperMin = TextEditingController(
-      text: ImuFrequencyAnalyzer.defaultBands[1].minHz.toString());
-  final _upperMax = TextEditingController(
-      text: ImuFrequencyAnalyzer.defaultBands[1].maxHz.toString());
-  late List<FrequencyBand> _bands;
+  late final _lowerMin =
+      TextEditingController(text: _settings._bands[0].minHz.toString());
+  late final _lowerMax =
+      TextEditingController(text: _settings._bands[0].maxHz.toString());
+  late final _upperMin =
+      TextEditingController(text: _settings._bands[1].minHz.toString());
+  late final _upperMax =
+      TextEditingController(text: _settings._bands[1].maxHz.toString());
   StreamSubscription<RawImuHistoryPoint?>? _subscription;
   StreamSubscription<AdcHistoryPoint?>? _adcSubscription;
   Timer? _timer;
@@ -88,16 +105,6 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   @override
   void initState() {
     super.initState();
-    _bands = [
-      FrequencyBand(
-          'Percussion band',
-          ImuFrequencyAnalyzer.defaultBands[0].minHz,
-          ImuFrequencyAnalyzer.defaultBands[0].maxHz),
-      FrequencyBand(
-          'Vibration band',
-          ImuFrequencyAnalyzer.defaultBands[1].minHz,
-          ImuFrequencyAnalyzer.defaultBands[1].maxHz),
-    ];
     _listen();
     _listenAdc();
     _timer = Timer.periodic(
@@ -214,14 +221,19 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
         adcFresh && _adcPoints.isNotEmpty ? _adcPoints.last : null;
     final analysis = latestImu == null
         ? null
-        : ImuFrequencyAnalyzer.analyze(_points, bands: _bands, sensor: _sensor);
+        : ImuFrequencyAnalyzer.analyze(
+            _points,
+            bands: _settings._bands,
+            sensor: _settings._sensor,
+            percussionBandIndex: 0,
+          );
     final adcResults = latestAdc == null
         ? null
         : AdcFrequencyAnalyzer.analyze(
             _adcPoints.toList(growable: false), _points,
-            bands: _bands,
-            sensor: _sensor,
-            channel: _adcChannel,
+            bands: _settings._bands,
+            sensor: _settings._sensor,
+            channel: _settings._adcChannel,
             highThreshold: _adcHighThreshold);
     setState(() {
       _analysis = analysis;
@@ -240,18 +252,19 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
         } else {
           _appendFrequency(FrequencyHistoryPoint(
             timestamp: now,
-            sensor: _sensor,
-            analysis:
-                analysis ?? _unavailable(_bands, 'Raw IMU data unavailable.'),
+            sensor: _settings._sensor,
+            analysis: analysis ??
+                _unavailable(_settings._bands, 'Raw IMU data unavailable.'),
             adc: _adcSeen
                 ? _adcAnalysis ??
-                    _unavailable([_bands.first], 'ADC data unavailable.')
+                    _unavailable(
+                        [_settings._bands.first], 'ADC data unavailable.')
                 : null,
             fused: _adcSeen
                 ? _fusedAnalysis ??
-                    _unavailable(_bands, 'ADC data unavailable.')
+                    _unavailable(_settings._bands, 'ADC data unavailable.')
                 : null,
-            adcChannel: _adcChannel,
+            adcChannel: _settings._adcChannel,
             adcEpoch: _adcEpoch,
             adcHighThreshold: _adcHighThreshold,
           ));
@@ -280,11 +293,11 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
     _gapLogged = true;
     _appendFrequency(FrequencyHistoryPoint(
       timestamp: _now(),
-      sensor: _sensor,
-      analysis: _unavailable(_bands, reason),
-      adc: _adcSeen ? _unavailable([_bands.first], reason) : null,
-      fused: _adcSeen ? _unavailable(_bands, reason) : null,
-      adcChannel: _adcChannel,
+      sensor: _settings._sensor,
+      analysis: _unavailable(_settings._bands, reason),
+      adc: _adcSeen ? _unavailable([_settings._bands.first], reason) : null,
+      fused: _adcSeen ? _unavailable(_settings._bands, reason) : null,
+      adcChannel: _settings._adcChannel,
       adcEpoch: _adcEpoch,
       adcHighThreshold: _adcHighThreshold,
     ));
@@ -317,7 +330,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
     }
     setState(() {
       _bandError = null;
-      _bands = [
+      _settings._bands = [
         FrequencyBand('Percussion band', values[0]!, values[1]!),
         FrequencyBand('Vibration band', values[2]!, values[3]!),
       ];
@@ -336,7 +349,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       _recordingStartedAt = _now();
       _recording = true;
     });
-    _recordingTimer = Timer(_recordingPeriod, _finishRecording);
+    _recordingTimer = Timer(_settings._recordingPeriod, _finishRecording);
   }
 
   Future<void> _finishRecording() async {
@@ -409,7 +422,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   }
 
   Future<void> _selectCustomRecordingPeriod() async {
-    var input = '${_recordingPeriod.inSeconds}';
+    var input = '${_settings._recordingPeriod.inSeconds}';
     String? error;
     final seconds = await showDialog<int>(
       context: context,
@@ -447,7 +460,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       }),
     );
     if (mounted && seconds != null) {
-      setState(() => _recordingPeriod = Duration(seconds: seconds));
+      setState(() => _settings._recordingPeriod = Duration(seconds: seconds));
     }
   }
 
@@ -527,7 +540,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
           minWidth: 254,
           maxColumns: showAdc ? 3 : 2,
           children: [
-            for (var i = 0; i < _bands.length; i++)
+            for (var i = 0; i < _settings._bands.length; i++)
               _frequencyResult(
                 i == 0 ? FrequencySeries.percussion : FrequencySeries.vibration,
                 analysis,
@@ -582,12 +595,12 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
         _adcPoints.isEmpty ? 8 : _adcPoints.last.sample.activeChannelCount;
     return _OptionSelect(
       label: 'ADC analysis channel',
-      value: _adcChannel,
+      value: _settings._adcChannel,
       options: {for (var i = 0; i < 8; i++) i: 'Channel ${i + 1}'},
       disabledValues: {for (var i = activeCount; i < 8; i++) i},
       onChanged: (channel) {
-        if (channel == null || channel == _adcChannel) return;
-        _adcChannel = channel;
+        if (channel == null || channel == _settings._adcChannel) return;
+        _settings._adcChannel = channel;
         _lastLoggedAdc = null;
         _update();
       },
@@ -595,7 +608,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   }
 
   Future<void> _selectVibrationGate() async {
-    final channel = _adcChannel;
+    final channel = _settings._adcChannel;
     var input = _adcHighThreshold?.toString() ?? '';
     String? error;
     final result = await showDialog<({int? threshold})>(
@@ -650,13 +663,13 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
     );
     if (!mounted ||
         result == null ||
-        result.threshold == _adcHighThresholds[channel]) {
+        result.threshold == _settings._adcHighThresholds[channel]) {
       return;
     }
     if (result.threshold case final threshold?) {
-      _adcHighThresholds[channel] = threshold;
+      _settings._adcHighThresholds[channel] = threshold;
     } else {
-      _adcHighThresholds.remove(channel);
+      _settings._adcHighThresholds.remove(channel);
     }
     _lastLoggedAdc = null;
     _update();
@@ -671,7 +684,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
     final result = analysis != null && index < analysis.bands.length
         ? analysis.bands[index]
         : null;
-    final band = result?.band ?? _bands[index];
+    final band = result?.band ?? _settings._bands[index];
     final peak = result?.peakHz;
     return Container(
       key: ValueKey(key ?? 'frequency-result-${series.name}'),
@@ -778,12 +791,12 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
                       Flexible(child: Text(series.label)),
                     ],
                   ),
-                  selected: _selectedSeries.contains(series),
+                  selected: _settings._selectedSeries.contains(series),
                   onSelected: (selected) => setState(() {
                     if (selected) {
-                      _selectedSeries.add(series);
+                      _settings._selectedSeries.add(series);
                     } else {
-                      _selectedSeries.remove(series);
+                      _settings._selectedSeries.remove(series);
                     }
                   }),
                 ),
@@ -796,7 +809,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
           children: [
             _OptionSelect(
               label: 'Display window',
-              value: _chartPeriod.inSeconds,
+              value: _settings._chartPeriod.inSeconds,
               options: const {
                 10: '10 seconds',
                 30: '30 seconds',
@@ -805,7 +818,8 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
               },
               onChanged: (seconds) {
                 if (seconds != null) {
-                  setState(() => _chartPeriod = Duration(seconds: seconds));
+                  setState(() =>
+                      _settings._chartPeriod = Duration(seconds: seconds));
                 }
               },
             ),
@@ -821,8 +835,11 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
               },
               onChanged: (minutes) {
                 if (minutes != null) {
-                  setState(() => _frequencyHistory.setRetention(
-                      Duration(minutes: minutes), _now()));
+                  final retention = Duration(minutes: minutes);
+                  setState(() {
+                    _settings._historyRetention = retention;
+                    _frequencyHistory.setRetention(retention, _now());
+                  });
                 }
               },
             ),
@@ -831,8 +848,8 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
         const SizedBox(height: 12),
         FrequencyHistoryChart(
           history: history,
-          visiblePeriod: _chartPeriod,
-          selected: _selectedSeries,
+          visiblePeriod: _settings._chartPeriod,
+          selected: _settings._selectedSeries,
           now: _now(),
         ),
         const SizedBox(height: 12),
@@ -852,7 +869,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
       30: '30 seconds',
       -1: 'Custom'
     };
-    final seconds = _recordingPeriod.inSeconds;
+    final seconds = _settings._recordingPeriod.inSeconds;
     return _AnalysisSection(
       title: 'CSV recording',
       children: [
@@ -869,8 +886,8 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
                     if (value == -1) {
                       _selectCustomRecordingPeriod();
                     } else if (value != null) {
-                      setState(
-                          () => _recordingPeriod = Duration(seconds: value));
+                      setState(() => _settings._recordingPeriod =
+                          Duration(seconds: value));
                     }
                   },
           ),
@@ -987,10 +1004,10 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
                         ])
                           ChoiceChip(
                             label: Text(choice.$2),
-                            selected: _sensor == choice.$1,
+                            selected: _settings._sensor == choice.$1,
                             onSelected: (_) {
                               setState(() {
-                                _sensor = choice.$1;
+                                _settings._sensor = choice.$1;
                                 _analysis = null;
                                 _lastLoggedSample = null;
                               });

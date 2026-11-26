@@ -50,12 +50,34 @@ class ImuFrequencyAnalyzer {
     FrequencyBand('Lower band', 1, 5),
     FrequencyBand('Higher band', 6.5, 10),
   ];
+  static const _gapReason =
+      'A gap in the sample window prevents a reliable spectrum.';
 
+  /// Select [percussionBandIndex] to use a fresh contiguous window after a
+  /// short timestamp stall. On the accelerometer, recurrence can also support
+  /// a marginal peak. With [defaultBands], the first band is selected.
   static ImuFrequencyAnalysis analyze(
     List<RawImuHistoryPoint> points, {
     Duration window = const Duration(seconds: 8),
     List<FrequencyBand> bands = defaultBands,
     RawSensorType sensor = RawSensorType.accelerometer,
+    int? percussionBandIndex,
+  }) {
+    final index =
+        percussionBandIndex ?? (identical(bands, defaultBands) ? 0 : null);
+    if (index != null) {
+      RangeError.checkValidIndex(index, bands, 'percussionBandIndex');
+    }
+    return _analyze(points, window, bands, sensor, percussionBandIndex: index);
+  }
+
+  static ImuFrequencyAnalysis _analyze(
+    List<RawImuHistoryPoint> points,
+    Duration window,
+    List<FrequencyBand> bands,
+    RawSensorType sensor, {
+    required int? percussionBandIndex,
+    bool afterGap = false,
   }) {
     final sensorName = sensor == RawSensorType.gyroscope
         ? 'gyroscope'
@@ -101,7 +123,7 @@ class ImuFrequencyAnalyzer {
       previousRaw = raw;
       final values =
           point.sample.flags.sampleValid ? point.valuesFor(sensor) : null;
-      timed.add(_TimedVector(elapsedMs, values));
+      timed.add(_TimedVector(elapsedMs, values, point));
     }
     if (timed.length < 3) {
       return unavailable('Waiting for distinct timestamps.');
@@ -140,12 +162,24 @@ class ImuFrequencyAnalyzer {
         1000.0 * intervals.length / (recent.last.ms - recent.first.ms));
     // Permit minor timestamp quantization and jitter, but do not fabricate a
     // signal through a missing packet or a prolonged gap in a BLE stream.
-    if (intervals.last > math.max(medianMs * 2.5, medianMs + 10)) {
-      return unavailable(
-          'A gap in the sample window prevents a reliable spectrum.',
-          rate: rate,
-          duration: duration,
-          count: recent.length);
+    final maxIntervalMs = math.max(medianMs * 2.5, medianMs + 10);
+    if (intervals.last > maxIntervalMs) {
+      // A short stall or a few missing samples may leave enough fresh data
+      // for percussion. Restart the spectrum after the last gap.
+      if (percussionBandIndex != null &&
+          !afterGap &&
+          intervals.last <= math.min(120, medianMs * 4 + 2)) {
+        final first = _startAfterShortGaps(recent, maxIntervalMs, medianMs);
+        if (first != null && last - recent[first].ms >= 2000) {
+          final suffixMs = last - recent[first].ms;
+          final suffix = _analyze(
+              points, Duration(milliseconds: suffixMs), bands, sensor,
+              percussionBandIndex: percussionBandIndex, afterGap: true);
+          if (suffix.bands[percussionBandIndex].peakHz != null) return suffix;
+        }
+      }
+      return unavailable(_gapReason,
+          rate: rate, duration: duration, count: recent.length);
     }
     if (rate < 2 || duration.inMilliseconds < 1000) {
       return unavailable('Collecting a longer sample window.',
@@ -160,6 +194,10 @@ class ImuFrequencyAnalyzer {
           rate: rate, duration: duration, count: recent.length);
     }
     final vectors = List.generate(3, (_) => List<double>.filled(n, 0));
+    final magnitudes =
+        percussionBandIndex != null && sensor == RawSensorType.accelerometer
+            ? List<double>.filled(n, 0)
+            : null;
     var right = 1;
     for (var i = 0; i < n; i++) {
       final t = recent.first.ms + i * resampledIntervalMs;
@@ -172,6 +210,12 @@ class ImuFrequencyAnalyzer {
       for (var axis = 0; axis < 3; axis++) {
         vectors[axis][i] =
             before.xyz![axis] + (after.xyz![axis] - before.xyz![axis]) * ratio;
+      }
+      if (magnitudes != null) {
+        final x = vectors[0][i];
+        final y = vectors[1][i];
+        final z = vectors[2][i];
+        magnitudes[i] = math.sqrt(x * x + y * y + z * z);
       }
     }
 
@@ -217,7 +261,11 @@ class ImuFrequencyAnalyzer {
     }
     final strongest = powers.reduce(math.max);
     final results = <FrequencyBandResult>[];
-    for (final band in bands) {
+    for (final (index, band) in bands.indexed) {
+      if (afterGap && index != percussionBandIndex) {
+        results.add(FrequencyBandResult(band, null, _gapReason));
+        continue;
+      }
       if (band.maxHz > safeMax) {
         results.add(FrequencyBandResult(
             band, null, 'Sample rate is too low for this entire band.'));
@@ -242,7 +290,11 @@ class ImuFrequencyAnalyzer {
       }
       var bestBin = firstBin;
       var bestPower = -1.0;
-      for (var k = firstBin; k <= lastBin; k++) {
+      // A short suffix has coarse bins. Include the bin just outside each
+      // edge so a peak near a band boundary can be placed by interpolation.
+      final searchFirst = afterGap ? math.max(1, firstBin - 1) : firstBin;
+      final searchLast = afterGap ? math.min(maxBin, lastBin + 1) : lastBin;
+      for (var k = searchFirst; k <= searchLast; k++) {
         if (powers[k] > bestPower) {
           bestPower = powers[k];
           bestBin = k;
@@ -250,14 +302,27 @@ class ImuFrequencyAnalyzer {
       }
       final sortedBand = powers.sublist(firstBin, lastBin + 1)..sort();
       final floor = sortedBand[sortedBand.length ~/ 2];
+      final peakHz = afterGap
+          ? _interpolateBin(powers, bestBin) * spacing
+          : bestBin * spacing;
       // Heuristic display guard, not a clinical threshold or statistical proof:
       // suppress tiny leakage beside a strong movement and broad/flat noise.
-      if (bestPower < strongest * 0.01 || bestPower < floor * 5) {
+      // A marginal percussion peak needs more relative power and independent
+      // evidence that the candidate period repeats in recent acceleration.
+      final confirmed = index == percussionBandIndex &&
+          magnitudes != null &&
+          bestPower >= strongest * 0.1 &&
+          bestPower >= floor * 3 &&
+          bestPower < floor * 5 &&
+          _hasAccelerationRecurrence(magnitudes, rate / peakHz);
+      if ((afterGap && (peakHz < band.minHz || peakHz > band.maxHz)) ||
+          bestPower < strongest * 0.01 ||
+          (bestPower < floor * 5 && !confirmed)) {
         results.add(FrequencyBandResult(band, null,
             'No distinct peak: this band is weak or lacks spectral contrast.'));
         continue;
       }
-      results.add(FrequencyBandResult(band, bestBin * spacing, null));
+      results.add(FrequencyBandResult(band, peakHz, null));
     }
     return ImuFrequencyAnalysis(
         error: null,
@@ -267,10 +332,125 @@ class ImuFrequencyAnalyzer {
         sampleCount: recent.length,
         bands: results);
   }
+
+  static double _interpolateBin(List<double> powers, int bin) {
+    if (bin <= 1 || bin + 1 == powers.length) return bin.toDouble();
+    final left = powers[bin - 1];
+    final center = powers[bin];
+    final right = powers[bin + 1];
+    if (left <= 0 || right <= 0 || center < math.max(left, right)) {
+      return bin.toDouble();
+    }
+    final curvature = 2 * math.log(center) - math.log(left) - math.log(right);
+    if (curvature <= 0) return bin.toDouble();
+    return bin + 0.5 * (math.log(right) - math.log(left)) / curvature;
+  }
+
+  static int? _startAfterShortGaps(
+      List<_TimedVector> points, double maxInterval, double nominalInterval) {
+    int? first;
+    for (var i = 1; i < points.length; i++) {
+      final elapsed = points[i].ms - points[i - 1].ms;
+      if (elapsed <= maxInterval) continue;
+      final before = points[i - 1].source;
+      final after = points[i].source;
+      final previous = before.sample;
+      final current = after.sample;
+      final mask = current.version == 2 ? 0xffff : 0xffffffff;
+      final step = (current.sequence - previous.sequence) & mask;
+      if (current.version != previous.version ||
+          after.deviceId != before.deviceId ||
+          after.sessionId != before.sessionId ||
+          step < 1 ||
+          step > 4 ||
+          step * nominalInterval > elapsed + 2) {
+        return null;
+      }
+      first = i;
+    }
+    return first;
+  }
+
+  static bool _hasAccelerationRecurrence(
+      List<double> magnitudes, double period) {
+    final end = magnitudes.length;
+    // Use two disjoint recent blocks, each long enough to compare multiple
+    // cycles. Cap the lookback so old impacts cannot corroborate a quiet tail.
+    final blockSize = math.min(end ~/ 2, (6 * period).ceil());
+    if (period < 8 || blockSize < 2.5 * period) return false;
+
+    final values = magnitudes.sublist(end - 2 * blockSize);
+    // Smooth each block symmetrically to reduce sample-to-sample ringing
+    // without shifting the cadence or sharing samples across the boundary.
+    for (final first in [0, blockSize]) {
+      var previous = values[first];
+      for (var i = first + 1; i < first + blockSize - 1; i++) {
+        final current = values[i];
+        values[i] = (previous + 2 * current + values[i + 1]) / 4;
+        previous = current;
+      }
+    }
+    // Allow for FFT bin quantization and require a common lag in both blocks.
+    var bestRepeat = 0.4;
+    int? bestLag;
+    for (var lag = (0.9 * period).ceil();
+        lag <= (1.1 * period).floor();
+        lag++) {
+      final repeat = math.min(_lagCorrelation(values, 0, blockSize, lag),
+          _lagCorrelation(values, blockSize, values.length, lag));
+      if (repeat >= bestRepeat) {
+        bestRepeat = repeat;
+        bestLag = lag;
+      }
+    }
+    return bestLag != null &&
+        _hasLagContrast(values, 0, blockSize, bestLag) &&
+        _hasLagContrast(values, blockSize, values.length, bestLag);
+  }
+
+  static bool _hasLagContrast(
+      List<double> values, int first, int end, int lag) {
+    final repeat = _lagCorrelation(values, first, end, lag);
+
+    // A faster repeating waveform can correlate again at a multiple of its
+    // period. Require the candidate to stand above shorter lags and its flank.
+    final limit = repeat - 0.15;
+    for (var shorter = (lag / 4).round();
+        shorter <= (lag * 0.75).round();
+        shorter++) {
+      if (_lagCorrelation(values, first, end, shorter) > limit) return false;
+    }
+    return _lagCorrelation(values, first, end, (lag * 1.25).round()) <= limit;
+  }
+
+  static double _lagCorrelation(
+      List<double> values, int first, int end, int lag) {
+    var sumX = 0.0;
+    var sumY = 0.0;
+    var sumXX = 0.0;
+    var sumYY = 0.0;
+    var sumXY = 0.0;
+    final count = end - first - lag;
+    final origin = values[first];
+    for (var i = first; i < end - lag; i++) {
+      final x = values[i] - origin;
+      final y = values[i + lag] - origin;
+      sumX += x;
+      sumY += y;
+      sumXX += x * x;
+      sumYY += y * y;
+      sumXY += x * y;
+    }
+    final varX = sumXX - sumX * sumX / count;
+    final varY = sumYY - sumY * sumY / count;
+    if (varX <= 0 || varY <= 0) return 0;
+    return (sumXY - sumX * sumY / count) / math.sqrt(varX * varY);
+  }
 }
 
 class _TimedVector {
   final int ms;
   final List<double>? xyz;
-  const _TimedVector(this.ms, this.xyz);
+  final RawImuHistoryPoint source;
+  const _TimedVector(this.ms, this.xyz, this.source);
 }

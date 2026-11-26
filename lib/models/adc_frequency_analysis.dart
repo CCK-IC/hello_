@@ -116,7 +116,7 @@ class AdcFrequencyAnalyzer {
     final fusedPercussion = envelope == null
         ? _corroborate(_percussion(sharedAdc, adcRate, percussion), sharedImu,
             vectors, imuRate, sensor)
-        : _corroborateEnvelope(envelope, sharedImu, vectors, imuRate);
+        : _corroborateEnvelope(envelope, sharedImu, vectors, imuRate, sensor);
     final fusedVibration = _vibration(sharedAdc, sharedImu, vibration, sensor,
         highThreshold: highThreshold);
     return (
@@ -235,9 +235,15 @@ class AdcFrequencyAnalyzer {
       ({int start, FrequencyBandResult band, List<int> peaks}) candidate,
       List<_Timed<RawImuHistoryPoint>> imu,
       List<List<double>> vectors,
-      double rateHz) {
+      double rateHz,
+      RawSensorType sensor) {
     final band = candidate.band.band;
     const reason = 'ADC contacts lack synchronized IMU impacts.';
+    final maxUsableHz = 0.4 * rateHz;
+    if (band.minHz > maxUsableHz) {
+      return FrequencyBandResult(
+          band, null, 'IMU sample rate is too low for the percussion band.');
+    }
     if (candidate.peaks.length < 3) {
       return FrequencyBandResult(
           band, null, 'Need at least three distinct ADC contacts.');
@@ -255,19 +261,115 @@ class AdcFrequencyAnalyzer {
       changes.add((ms: imu[i].ms, value: math.sqrt(energy)));
     }
     if (changes.length < 3) return FrequencyBandResult(band, null, reason);
+    final toleranceMs = (1500 / rateHz).clamp(25.0, 35.0);
     final levels = changes.map((point) => point.value).toList()..sort();
     final baseline = _quantile(levels, 0.5);
     final contrast = _quantile(levels, 0.985) - baseline;
-    if (contrast <= 0) return FrequencyBandResult(band, null, reason);
-    final impacts = _peaks(changes, baseline + 0.45 * contrast,
-        minSeparationMs: math.min(110, 500 / band.maxHz).round());
-    final matched = _matchedAdcPeaks(
-        candidate.peaks, impacts, (1500 / rateHz).clamp(25.0, 35.0),
-        allowExtraImuImpacts: true);
-    return matched.isEmpty
-        ? FrequencyBandResult(band, null, reason)
-        : _cadence(matched, band, maxUsableHz: 0.4 * rateHz);
+    final levelContrast = _minimumImuImpactContrast(sensor);
+    // At higher sample rates, the same motion produces smaller steps.
+    final minimumContrast = levelContrast * math.min(1, 100 / rateHz);
+    final changeImpacts = contrast < minimumContrast
+        ? <int>[]
+        : _peaks(changes, baseline + 0.45 * contrast,
+            minSeparationMs: math.min(110, 500 / band.maxHz).round());
+    final unavailable = FrequencyBandResult(band, null, reason);
+
+    ({FrequencyBandResult result, int support}) corroborate(List<int> impacts,
+        {List<int> otherImpacts = const []}) {
+      final matched = _matchImpacts(candidate.peaks, impacts, toleranceMs,
+          allowExtraImuImpacts: true);
+      if (matched.isEmpty) return (result: unavailable, support: 0);
+      // A missing corroboration cannot stretch two contacts into one cycle.
+      final peaks = candidate.peaks;
+      final periods = <int>[];
+      final impactIntervals = <({int start, int end})>[];
+      final fastestPeriod = 1000 / math.min(band.maxHz, maxUsableHz);
+      final slowestPeriod = 1000 / band.minHz;
+      for (var i = 1; i < matched.length; i++) {
+        final previous = matched[i - 1];
+        final next = matched[i];
+        if (next.adcIndex != previous.adcIndex + 1) continue;
+        final period = peaks[next.adcIndex] - peaks[previous.adcIndex];
+        periods.add(period);
+        if (period >= fastestPeriod && period <= slowestPeriod) {
+          impactIntervals.add(
+              (start: impacts[previous.imuIndex], end: impacts[next.imuIndex]));
+        }
+      }
+      if (_hasMidpointImpacts(impactIntervals, impacts) ||
+          _hasMidpointImpacts(impactIntervals, otherImpacts)) {
+        return (result: unavailable, support: 0);
+      }
+      final result =
+          _cadenceFromPeriods(periods, band, maxUsableHz: maxUsableHz);
+      return (
+        result: result,
+        support: result.peakHz == null ? 0 : matched.length
+      );
+    }
+
+    final primary = corroborate(changeImpacts);
+    if (primary.support > 0) return primary.result;
+
+    // Several weaker changes can mark contact while a sharp rebound dominates
+    // the unsmoothed peak. Average over a short portion of the fastest cycle.
+    final smoothed = _centeredMean(changes, math.min(30, 150 / band.maxHz));
+    final smoothLevels = smoothed.map((point) => point.value).toList()..sort();
+    final smoothBaseline = _quantile(smoothLevels, 0.5);
+    final smoothContrast = _quantile(smoothLevels, 0.9) - smoothBaseline;
+    final minSeparationMs = math.min(80, 400 / band.maxHz).round();
+    if (smoothContrast >= minimumContrast) {
+      final smoothedResult = corroborate(
+          _peaks(smoothed, smoothBaseline + 0.35 * smoothContrast,
+              minSeparationMs: minSeparationMs),
+          otherImpacts: changeImpacts);
+      if (smoothedResult.support > 0) return smoothedResult.result;
+    }
+
+    // Sparse samples can capture the level response without resolving the
+    // sharp changes around it. Compare level peaks in the same contact window.
+    final first = imu.indexWhere((point) => point.ms >= candidate.start);
+    var best = primary;
+    for (final impacts in _signedImuImpacts(imu, vectors, levelContrast,
+        first: first, minSeparationMs: minSeparationMs)) {
+      final result = corroborate(impacts, otherImpacts: changeImpacts);
+      if (result.support > best.support) best = result;
+    }
+    if (best.support > 0) return best.result;
+    final magnitudeResult = corroborate(
+        _magnitudeImuImpacts(imu, vectors, levelContrast,
+            first: first, minSeparationMs: minSeparationMs),
+        otherImpacts: changeImpacts);
+    return magnitudeResult.support > 0
+        ? magnitudeResult.result
+        : primary.result;
   }
+
+  static bool _hasMidpointImpacts(
+      List<({int start, int end})> intervals, List<int> impacts) {
+    if (intervals.length < 2 || impacts.isEmpty) return false;
+    var next = 0;
+    var midpointCount = 0;
+    for (final interval in intervals) {
+      final span = interval.end - interval.start;
+      final earliest = interval.start + 0.4 * span;
+      final latest = interval.start + 0.6 * span;
+      while (next < impacts.length && impacts[next] < earliest) {
+        next++;
+      }
+      if (next < impacts.length && impacts[next] <= latest) midpointCount++;
+    }
+    // In a doubled train the first and last matches can give the slower
+    // stream a majority even when there is an extra impact every cycle.
+    return 3 * midpointCount >= 2 * intervals.length;
+  }
+
+  static double _minimumImuImpactContrast(RawSensorType sensor) =>
+      switch (sensor) {
+        RawSensorType.accelerometer => 0.002, // g
+        RawSensorType.gyroscope => 0.25, // degrees/s
+        RawSensorType.magnetometer => 4.0, // counts
+      };
 
   static FrequencyBandResult _corroborate(
     _Percussion candidate,
@@ -290,59 +392,33 @@ class AdcFrequencyAnalyzer {
 
     // Evaluate each axis and polarity independently. A fixed choice of sign
     // avoids counting both lobes of a single oscillation as separate impacts.
-    final minimumContrast = switch (sensor) {
-      RawSensorType.accelerometer => 0.002, // g
-      RawSensorType.gyroscope => 0.25, // degrees/s
-      RawSensorType.magnetometer => 4.0, // counts
-    };
+    final minimumContrast = _minimumImuImpactContrast(sensor);
     final toleranceMs = (1000 / rateHz).clamp(20.0, 35.0);
     var synchronized = false;
     var bestSupport = 0;
     FrequencyBandResult? best;
 
-    void consider(List<_Timed<double>> signal, double baseline, double top) {
-      final contrast = top - baseline;
-      if (contrast < minimumContrast) return;
-      final impacts = _peaks(signal, baseline + 0.5 * contrast);
-      final matched = _matchedAdcPeaks(adcPeaks, impacts, toleranceMs);
+    void consider(List<int> impacts) {
+      final matched = _matchImpacts(adcPeaks, impacts, toleranceMs);
       if (matched.isEmpty) return;
       synchronized = true;
       if (matched.length <= bestSupport) return;
-      final result = _cadence(matched, band, maxUsableHz: maxUsableHz);
+      final result = _cadence(
+          [for (final pair in matched) adcPeaks[pair.adcIndex]], band,
+          maxUsableHz: maxUsableHz);
       if (result.peakHz != null) {
         best = result;
         bestSupport = matched.length;
       }
     }
 
-    for (var axis = 0; axis < 3; axis++) {
-      for (final sign in [1, -1]) {
-        final signal = [
-          for (var i = 0; i < imu.length; i++)
-            (ms: imu[i].ms, value: sign * vectors[i][axis]),
-        ];
-        final levels = signal.map((p) => p.value).toList()..sort();
-        consider(signal, _quantile(levels, 0.5), _quantile(levels, 0.985));
-      }
+    for (final impacts in _signedImuImpacts(imu, vectors, minimumContrast)) {
+      consider(impacts);
     }
     if (best == null) {
       // Taps in different directions may never appear together on a single
       // axis. Check their magnitude relative to the window's resting vector.
-      final center = [
-        for (var axis = 0; axis < 3; axis++)
-          _quantile([for (final vector in vectors) vector[axis]]..sort(), 0.5),
-      ];
-      final magnitudes = <_Timed<double>>[];
-      for (var i = 0; i < vectors.length; i++) {
-        var energy = 0.0;
-        for (var axis = 0; axis < 3; axis++) {
-          final delta = vectors[i][axis] - center[axis];
-          energy += delta * delta;
-        }
-        magnitudes.add((ms: imu[i].ms, value: math.sqrt(energy)));
-      }
-      final levels = magnitudes.map((p) => p.value).toList()..sort();
-      consider(magnitudes, _quantile(levels, 0.5), _quantile(levels, 0.985));
+      consider(_magnitudeImuImpacts(imu, vectors, minimumContrast));
     }
     return best ??
         FrequencyBandResult(
@@ -352,6 +428,59 @@ class AdcFrequencyAnalyzer {
               ? 'Need at least two synchronized tap intervals within the percussion band.'
               : 'ADC peaks lack synchronized IMU impacts.',
         );
+  }
+
+  static Iterable<List<int>> _signedImuImpacts(
+    List<_Timed<RawImuHistoryPoint>> imu,
+    List<List<double>> vectors,
+    double minimumContrast, {
+    int first = 0,
+    int minSeparationMs = 0,
+  }) sync* {
+    for (var axis = 0; axis < 3; axis++) {
+      for (final sign in [1, -1]) {
+        yield _imuLevelPeaks([
+          for (var i = first; i < imu.length; i++)
+            (ms: imu[i].ms, value: sign * vectors[i][axis]),
+        ], minimumContrast, minSeparationMs);
+      }
+    }
+  }
+
+  static List<int> _magnitudeImuImpacts(
+    List<_Timed<RawImuHistoryPoint>> imu,
+    List<List<double>> vectors,
+    double minimumContrast, {
+    int first = 0,
+    int minSeparationMs = 0,
+  }) {
+    final center = [
+      for (var axis = 0; axis < 3; axis++)
+        _quantile(
+            [for (var i = first; i < vectors.length; i++) vectors[i][axis]]
+              ..sort(),
+            0.5),
+    ];
+    final magnitudes = <_Timed<double>>[];
+    for (var i = first; i < vectors.length; i++) {
+      var energy = 0.0;
+      for (var axis = 0; axis < 3; axis++) {
+        final delta = vectors[i][axis] - center[axis];
+        energy += delta * delta;
+      }
+      magnitudes.add((ms: imu[i].ms, value: math.sqrt(energy)));
+    }
+    return _imuLevelPeaks(magnitudes, minimumContrast, minSeparationMs);
+  }
+
+  static List<int> _imuLevelPeaks(List<_Timed<double>> signal,
+      double minimumContrast, int minSeparationMs) {
+    final levels = signal.map((p) => p.value).toList()..sort();
+    final baseline = _quantile(levels, 0.5);
+    final contrast = _quantile(levels, 0.985) - baseline;
+    if (contrast < minimumContrast) return [];
+    return _peaks(signal, baseline + 0.5 * contrast,
+        minSeparationMs: minSeparationMs);
   }
 
   static FrequencyBandResult _vibration(
@@ -420,13 +549,19 @@ typedef _Percussion = ({FrequencyBandResult band, List<int> peaks});
 /// Typical rate of observed events. Pauses and rebound intervals outside the
 /// selected band do not contribute. Do not synthesize missed events.
 FrequencyBandResult _cadence(List<int> peaks, FrequencyBand band,
-    {double maxUsableHz = double.infinity}) {
+        {double maxUsableHz = double.infinity}) =>
+    _cadenceFromPeriods([
+      for (var i = 1; i < peaks.length; i++) peaks[i] - peaks[i - 1],
+    ], band, maxUsableHz: maxUsableHz);
+
+FrequencyBandResult _cadenceFromPeriods(
+    List<int> observedPeriods, FrequencyBand band,
+    {required double maxUsableHz}) {
   final fastestPeriod = 1000 / math.min(band.maxHz, maxUsableHz);
   final slowestPeriod = 1000 / band.minHz;
   final periods = <int>[];
   var tooFast = 0;
-  for (var i = 1; i < peaks.length; i++) {
-    final period = peaks[i] - peaks[i - 1];
+  for (final period in observedPeriods) {
     if (period < fastestPeriod) {
       tooFast++;
     } else if (period <= slowestPeriod) {
@@ -526,6 +661,25 @@ double _quantile(List<num> sorted, double fraction) {
   return low + (sorted[index.ceil()] - low) * (index - index.floor());
 }
 
+List<_Timed<double>> _centeredMean(
+    List<_Timed<double>> signal, double halfWidthMs) {
+  final smoothed = <_Timed<double>>[];
+  var left = 0;
+  var right = 0;
+  var sum = 0.0;
+  for (final point in signal) {
+    while (
+        right < signal.length && signal[right].ms <= point.ms + halfWidthMs) {
+      sum += signal[right++].value;
+    }
+    while (signal[left].ms < point.ms - halfWidthMs) {
+      sum -= signal[left++].value;
+    }
+    smoothed.add((ms: point.ms, value: sum / (right - left)));
+  }
+  return smoothed;
+}
+
 Iterable<({int first, int end})> _aboveThreshold(
     List<_Timed<double>> signal, double threshold) sync* {
   int? first;
@@ -600,7 +754,9 @@ List<int> _contactPeaks(
   return peaks;
 }
 
-List<int> _matchedAdcPeaks(
+typedef _ImpactPair = ({int adcIndex, int imuIndex});
+
+List<_ImpactPair> _matchImpacts(
     List<int> adcPeaks, List<int> impacts, double toleranceMs,
     {bool allowExtraImuImpacts = false}) {
   const maxLagMs = 90;
@@ -614,7 +770,7 @@ List<int> _matchedAdcPeaks(
       math.max(3, math.max((2 * adcPeaks.length / 3).ceil(), requiredImu));
   if (required > math.min(adcPeaks.length, impacts.length)) return [];
 
-  var best = <int>[];
+  var best = <_ImpactPair>[];
   var bestError = double.infinity;
   // Test one shared lead or lag for the entire window. The residual allowance
   // covers timestamp quantization and small changes in the impact shape.
@@ -622,13 +778,13 @@ List<int> _matchedAdcPeaks(
     var i = 0;
     var j = 0;
     var error = 0.0;
-    final matched = <int>[];
+    final matched = <_ImpactPair>[];
     final offsets = <int>[];
     while (i < adcPeaks.length && j < impacts.length) {
       final offset = impacts[j] - adcPeaks[i];
       final residual = offset - lag;
       if (residual.abs() <= toleranceMs) {
-        matched.add(adcPeaks[i]);
+        matched.add((adcIndex: i, imuIndex: j));
         offsets.add(offset);
         error += residual.abs();
         i++;
