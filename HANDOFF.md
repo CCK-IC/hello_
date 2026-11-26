@@ -6,6 +6,20 @@ file through the repository's normal Git workflow so other checkouts receive it.
 
 The app and sensor firmware are separate repositories. Mac and Windows also use separate checkouts: verify each checkout's repository, branch, commits, and local changes before transferring work. A commit in one checkout does not automatically update another.
 
+## Shared device status bar, 2026-11-26
+
+- App patch **1.2.2+7** starts from `322f7ea`, published as app **1.2.1+6** on
+  `codex/v1.2.1` after 158 Flutter tests passed. The status bar patch is on
+  `codex/v1.2.2`.
+- Both connected views use the same live status state. The top bar shows
+  battery charge, IMU state and sample rates separately from BLE notification
+  rates. **Details** provides board, firmware, and diagnostic counters.
+  Disabling Device status clears its telemetry while rates carried in enabled
+  raw IMU and ADC streams can still appear.
+- The status bar passed 163 Flutter tests and 17 focused Chrome tests,
+  including live packet updates while analysis is open and a disconnect on
+  that route. Static analysis and the web release build passed.
+
 ## ADC notification telemetry, 2026-11-26
 
 - App **1.2.0+5** reports separate IMU and ADC notification rates in

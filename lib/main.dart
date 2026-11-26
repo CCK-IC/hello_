@@ -16,6 +16,7 @@ import "models/subscription_operation_gate.dart";
 import "models/raw_stream_watchdog.dart";
 import "widgets/raw_imu_chart.dart";
 import "widgets/adc_chart.dart";
+import "widgets/device_status_top_bar.dart";
 import "widgets/imu_analysis_page.dart";
 import 'widgets/control_panel.dart';
 
@@ -97,6 +98,42 @@ class _BleImuAppState extends State<BleImuApp> {
   Timer? _rawWatchdogTimer;
   final _rawWatchdog = RawStreamWatchdog();
   bool _rawStreamStalled = false;
+  final _deviceStatus = ValueNotifier<DeviceStatusSnapshot>((
+    connection: DeviceStatusConnection.disconnected,
+    deviceName: null,
+    telemetry: null,
+    imuSampleRateHz: null,
+    adcSampleRateHz: null,
+    statusEnabled: false,
+    rawEnabled: false,
+    adcEnabled: false,
+    rawStalled: false,
+  ));
+
+  void _updateDeviceStatus(VoidCallback update) {
+    setState(update);
+    final device = _connectedDevice;
+    final connected = device != null && _linkConnected;
+    final statusEnabled = connected && _enabledStreams['status']!;
+    final rawEnabled = connected && _enabledStreams['rawImu']!;
+    final adcEnabled = connected && _enabledStreams['auxiliary']!;
+    _deviceStatus.value = (
+      connection: connected
+          ? DeviceStatusConnection.connected
+          : _connecting
+              ? DeviceStatusConnection.connecting
+              : DeviceStatusConnection.disconnected,
+      deviceName: connected ? _deviceName(device) : null,
+      telemetry: statusEnabled ? _latestStatus : null,
+      imuSampleRateHz: rawEnabled ? _latestRawSample?.measuredRateHz : null,
+      adcSampleRateHz:
+          adcEnabled ? _adcHistory.latest?.sample.measuredRateHz : null,
+      statusEnabled: statusEnabled,
+      rawEnabled: rawEnabled,
+      adcEnabled: adcEnabled,
+      rawStalled: rawEnabled && _rawStreamStalled,
+    );
+  }
 
   void _startRawWatchdog() {
     _rawWatchdog.start(DateTime.now());
@@ -116,7 +153,7 @@ class _BleImuAppState extends State<BleImuApp> {
     _uiRefreshPending = true;
     _uiRefreshTimer = Timer(const Duration(milliseconds: 40), () {
       _uiRefreshPending = false;
-      if (mounted) setState(() {});
+      if (mounted) _updateDeviceStatus(() {});
     });
   }
 
@@ -311,7 +348,7 @@ class _BleImuAppState extends State<BleImuApp> {
     _rawWatchdogTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final stalled = _rawWatchdog.isStalled(DateTime.now());
       if (mounted && stalled != _rawStreamStalled) {
-        setState(() => _rawStreamStalled = stalled);
+        _updateDeviceStatus(() => _rawStreamStalled = stalled);
       }
     });
     _controlPanelController = ControlPanelController();
@@ -429,7 +466,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
       if (wasConnected && mounted) {
         _rawRecordingTimer?.cancel();
-        setState(() {
+        _updateDeviceStatus(() {
           _connectedDevice = null;
           _latestRawSample = null;
           _latestStatus = null;
@@ -507,7 +544,7 @@ class _BleImuAppState extends State<BleImuApp> {
     _controlPanelController.clearLastRateSet();
     _controlPanelController.requestedAdcRate =
         savedAdcRate?.toDouble() ?? defaultRequestedAdcRateHz;
-    setState(() {
+    _updateDeviceStatus(() {
       _isScanning = false;
       _connecting = true;
       _connectionError = null;
@@ -591,7 +628,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
       if (!mounted) return;
 
-      setState(() {
+      _updateDeviceStatus(() {
         _connectedDevice = device;
         _connecting = false;
         _connectionError = null;
@@ -610,7 +647,7 @@ class _BleImuAppState extends State<BleImuApp> {
       }
 
       if (mounted) {
-        setState(() {
+        _updateDeviceStatus(() {
           _connectedDevice = null;
           _connecting = false;
           _connectionError = "BLE setup failed: $error";
@@ -737,7 +774,7 @@ class _BleImuAppState extends State<BleImuApp> {
         break;
     }
 
-    setState(() {
+    _updateDeviceStatus(() {
       _enabledStreams[key] = enabled;
       if (key == "rawImu" && !enabled) _stopRawWatchdog();
     });
@@ -785,7 +822,7 @@ class _BleImuAppState extends State<BleImuApp> {
 
       if (!_subscriptionGate.finish(key, token) || !mounted) return;
 
-      setState(() {
+      _updateDeviceStatus(() {
         if (enabled && key == "rawImu") _startRawWatchdog();
         if (!enabled && key == "rawImu") {
           _latestRawSample = null;
@@ -800,7 +837,7 @@ class _BleImuAppState extends State<BleImuApp> {
         return;
       }
 
-      setState(() {
+      _updateDeviceStatus(() {
         _enabledStreams[key] = previous;
         if (key == "rawImu" && previous) _startRawWatchdog();
         _connectionError = timedOut
@@ -829,7 +866,7 @@ class _BleImuAppState extends State<BleImuApp> {
         throw StateError("Device is still connected ($state)");
       }
       if (!mounted) return;
-      setState(() {
+      _updateDeviceStatus(() {
         _connectedDevice = null;
         _linkConnected = false;
         _resetIngress();
@@ -840,7 +877,7 @@ class _BleImuAppState extends State<BleImuApp> {
       });
     } catch (error) {
       if (mounted) {
-        setState(() {
+        _updateDeviceStatus(() {
           if (_connectedDevice != null && _enabledStreams["rawImu"] == true) {
             _startRawWatchdog();
           }
@@ -868,6 +905,7 @@ class _BleImuAppState extends State<BleImuApp> {
     UniversalBle.onValueChange = null;
     UniversalBle.onConnectionChange = null;
     _controlPanelController.dispose();
+    _deviceStatus.dispose();
 
     final deviceId = _connectedDevice?.deviceId ?? _pendingDeviceId;
     if (deviceId != null && !_disconnecting) {
@@ -931,9 +969,14 @@ class _BleImuAppState extends State<BleImuApp> {
   @override
   Widget build(BuildContext context) {
     final device = _connectedDevice;
+    final textScaler = MediaQuery.textScalerOf(context);
     return Scaffold(
       appBar: AppBar(
         title: const Text(BleImuMonitor.title),
+        bottom: device != null || _connecting
+            ? DeviceStatusTopBar(
+                listenable: _deviceStatus, textScaler: textScaler)
+            : null,
         actions: [
           if (device == null)
             IconButton(
@@ -958,6 +1001,7 @@ class _BleImuAppState extends State<BleImuApp> {
                     samples: _analysisSamples.stream,
                     adcSamples: _analysisAdcSamples.stream,
                     settings: _analysisSettings,
+                    deviceStatus: _deviceStatus,
                   ),
                 ),
               ),
@@ -987,7 +1031,7 @@ class _BleImuAppState extends State<BleImuApp> {
               )
             : device == null
                 ? _buildScannerList()
-                : _buildDashboard(device),
+                : _buildDashboard(),
       ),
     );
   }
@@ -1042,14 +1086,10 @@ class _BleImuAppState extends State<BleImuApp> {
     return name == null || name.isEmpty ? "Unnamed Sensor" : name;
   }
 
-  Widget _buildDashboard(BleDevice device) {
+  Widget _buildDashboard() {
     return _PageContent(
       key: const ValueKey('dashboard'),
       children: [
-        _SectionCard(children: [
-          const Text("Connected sensor"),
-          _SectionHeading(_deviceName(device)),
-        ]),
         if (_rawStreamStalled)
           _StatusNotice(
             _subscriptionGate.isUncertain("rawImu")
@@ -1057,7 +1097,6 @@ class _BleImuAppState extends State<BleImuApp> {
                 : "Raw notifications have stopped. The device may be disconnected; disconnect and reconnect to retry.",
           ),
         if (_connectionError case final error?) _StatusNotice(error),
-        _buildTelemetry(),
         _buildRawReadings(),
         _buildSubscriptions(),
         _buildRawVisualization(),
@@ -1069,40 +1108,6 @@ class _BleImuAppState extends State<BleImuApp> {
         ),
       ],
     );
-  }
-
-  Widget _buildTelemetry() {
-    final status = _latestStatus;
-    final adcNotificationRate = status?.adcNotificationRate;
-    return _SectionCard(children: [
-      const _SectionHeading("Device telemetry"),
-      const SizedBox(height: 8),
-      if (status == null)
-        Text(_enabledStreams["status"]!
-            ? "Waiting for device status notifications."
-            : "Enable Device status under BLE subscriptions to see telemetry.")
-      else
-        Wrap(
-          spacing: 24,
-          runSpacing: 8,
-          children: [
-            Text("Board: ${status.boardName}"),
-            Text("Firmware: ${status.firmwareVersion}"),
-            Text("IMU state: ${status.imuStateString}"),
-            Text(
-                "Battery: ${status.batteryMilliVolts} mV (${status.batteryPercent}%)"),
-            Text("Sensor sample rate: ${status.actualSensorRate} Hz"),
-            Text("IMU notification rate: ${status.notificationRate} packets/s"),
-            Text(adcNotificationRate == null
-                ? "ADC notification rate: Unavailable"
-                : "ADC notification rate: $adcNotificationRate packets/s"),
-            Text("Uptime: ${(status.uptimeMs / 1000).toStringAsFixed(1)} s"),
-            Text("Dropped notifications: ${status.droppedNotifications}"),
-            Text("Discarded sensor samples: ${status.bufferDroppedSamples}"),
-            Text("FIFO / I2C recoveries: ${status.fifoRecoveries}"),
-          ],
-        ),
-    ]);
   }
 
   Widget _buildRawReadings() {
@@ -1121,8 +1126,6 @@ class _BleImuAppState extends State<BleImuApp> {
             Chip(label: Text("Raw v${raw.version}")),
             Chip(label: Text("Sequence ${raw.sequence}")),
             Chip(label: Text("${raw.timestampMs} ms")),
-            if (raw.measuredRateHz != null)
-              Chip(label: Text("${raw.measuredRateHz} Hz")),
             if (raw.flags.dmpActive)
               const Chip(
                 avatar: Icon(Icons.sync, size: 16),

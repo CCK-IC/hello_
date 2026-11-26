@@ -105,6 +105,7 @@ class AdcHistory {
 
   List<AdcHistoryPoint> get points => List.unmodifiable(_points);
   bool get isEmpty => _points.isEmpty;
+  AdcHistoryPoint? get latest => _points.isEmpty ? null : _points.last;
 
   /// Returns the visible window, keeping the latest reading for its label.
   List<AdcHistoryPoint> pointsSince(DateTime cutoff) {

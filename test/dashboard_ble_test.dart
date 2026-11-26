@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:ble_imu_visualizer/main.dart';
 import 'package:ble_imu_visualizer/models/protocol.dart';
 import 'package:ble_imu_visualizer/widgets/adc_chart.dart';
+import 'package:ble_imu_visualizer/widgets/device_status_top_bar.dart';
 import 'package:ble_imu_visualizer/widgets/frequency_history_chart.dart';
 import 'package:ble_imu_visualizer/widgets/raw_imu_chart.dart';
 import 'package:flutter/material.dart';
@@ -104,7 +105,10 @@ Uint8List _auxPacket(int sequence, List<int> channels) {
 }
 
 Uint8List _batch(int kind, List<int> deltas,
-    {int sequence = 100, int timestamp = 1000, bool peer = false}) {
+    {int sequence = 100,
+    int timestamp = 1000,
+    int measuredRate = 25,
+    bool peer = false}) {
   final slotSize = kind == 1 ? 24 : 20;
   final data = ByteData(28 + deltas.length * slotSize * 2)
     ..setUint8(0, 3)
@@ -116,7 +120,7 @@ Uint8List _batch(int kind, List<int> deltas,
     data
       ..setUint32(metadata, sequence, Endian.little)
       ..setUint32(metadata + 4, timestamp, Endian.little)
-      ..setUint16(metadata + 8, 25, Endian.little)
+      ..setUint16(metadata + 8, measuredRate, Endian.little)
       ..setUint8(metadata + 10, kind == 3 ? 8 : 0);
     for (var i = 0; i < deltas.length; i++) {
       final offset = 28 + (i * 2 + glove) * slotSize;
@@ -366,8 +370,8 @@ void main() {
 
     expect(find.byTooltip('Analyze IMU data'), findsOneWidget);
     expect(find.byTooltip('Disconnect sensor'), findsOneWidget);
+    expect(find.byType(DeviceStatusTopBar), findsOneWidget);
     for (final heading in [
-      'Device telemetry',
       'Raw ICM-20948 Data',
       'BLE subscriptions',
       'Raw data visualization',
@@ -665,28 +669,73 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('telemetry shows separate IMU and ADC notification rates',
+  testWidgets(
+      'both app bars receive live device status and clear on disconnect',
       (tester) async {
-    final ble = _FakeBlePlatform();
+    await tester.binding.setSurfaceSize(const Size(1200, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final ble = _FakeBlePlatform(
+        scanResult: BleDevice(deviceId: _deviceId, name: _deviceName));
     await _connectDashboard(tester, ble);
+    final aux = find.widgetWithText(SwitchListTile, 'Auxiliary sensor');
+    if (!tester.widget<SwitchListTile>(aux).value) {
+      await _toggle(tester, 'Auxiliary sensor');
+    }
+
+    final bar = find.byType(DeviceStatusTopBar);
+    DeviceStatusSnapshot snapshot() =>
+        tester.widget<DeviceStatusTopBar>(bar).listenable.value;
+    Finder reading(String value) =>
+        find.descendant(of: bar, matching: find.text(value));
+    expect(snapshot().connection, DeviceStatusConnection.connected);
+    expect(snapshot().deviceName, _deviceName);
+    expect(snapshot().telemetry, isNull);
 
     _emit(ble, BleUuids.statusChar, statusFrame());
+    _emit(ble, BleUuids.rawImuChar, _batch(1, [0, 22], measuredRate: 45));
+    _emit(ble, BleUuids.auxiliaryChar, _batch(3, [0, 10], measuredRate: 100));
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.text('IMU notification rate: 50 packets/s'), findsOneWidget);
-    expect(find.text('ADC notification rate: Unavailable'), findsOneWidget);
+    expect(reading('87%'), findsOneWidget);
+    expect(reading('45 Hz'), findsOneWidget);
+    expect(reading('100 Hz'), findsOneWidget);
+    expect(reading('50 pkt/s'), findsOneWidget);
+    expect(snapshot().telemetry?.adcNotificationRate, isNull);
 
     final parts = _fragments(statusFrame(adcNotificationRates: {0: 25}), 1);
     _emit(ble, BleUuids.statusChar, parts.first);
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.text('ADC notification rate: Unavailable'), findsOneWidget);
+    expect(snapshot().telemetry?.adcNotificationRate, isNull);
     _emit(ble, BleUuids.statusChar, parts.last);
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.text('IMU notification rate: 50 packets/s'), findsOneWidget);
-    expect(find.text('ADC notification rate: 25 packets/s'), findsOneWidget);
+    expect(reading('25 pkt/s'), findsOneWidget);
 
-    _emit(ble, BleUuids.statusChar, statusFrame(adcNotificationRates: {0: 0}));
+    await tester.tap(find.byTooltip('Analyze IMU data'));
+    await tester.pumpAndSettle();
+    expect(reading('87%'), findsOneWidget);
+    expect(reading('25 pkt/s'), findsOneWidget);
+    final updated = statusFrame(adcNotificationRates: {0: 0})..[4 + 16] = 12;
+    _emit(ble, BleUuids.statusChar, updated);
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.text('ADC notification rate: 0 packets/s'), findsOneWidget);
+    expect(reading('12%'), findsOneWidget);
+    expect(reading('0 pkt/s'), findsOneWidget);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(reading('12%'), findsOneWidget);
+    await _toggle(tester, 'Device status');
+    expect(snapshot().statusEnabled, isFalse);
+    expect(snapshot().telemetry, isNull);
+    expect(reading('12%'), findsNothing);
+    expect(reading('45 Hz'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Analyze IMU data'));
+    await tester.pumpAndSettle();
+    ble.updateConnection(_deviceId, false);
+    await tester.pump();
+    expect(snapshot().connection, DeviceStatusConnection.disconnected);
+    expect(snapshot().imuSampleRateHz, isNull);
+    expect(snapshot().adcSampleRateHz, isNull);
+    expect(reading('45 Hz'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -700,6 +749,11 @@ void main() {
     final raw = _fragments(_batch(1, [0, 17, 60]), 1);
     final aux = _fragments(_batch(3, [0, 25, 50, 80]), 1);
     final status = _fragments(_statusBatch(), 1);
+    DeviceStatus? telemetry() => tester
+        .widget<DeviceStatusTopBar>(find.byType(DeviceStatusTopBar))
+        .listenable
+        .value
+        .telemetry;
     _emit(ble, BleUuids.rawImuChar, raw.first);
     _emit(ble, BleUuids.auxiliaryChar, aux.first);
     _emit(ble, BleUuids.statusChar, status.first);
@@ -708,7 +762,7 @@ void main() {
         tester.widget<RawImuChart>(find.byType(RawImuChart)).history, isEmpty);
     expect(tester.widget<AdcChart>(find.byType(AdcChart)).history, isEmpty);
     expect(find.textContaining('Rejected ADC packets'), findsNothing);
-    expect(find.text('Firmware: 1.4.0'), findsNothing);
+    expect(telemetry(), isNull);
     _emit(ble, BleUuids.auxiliaryChar, aux.last);
     _emit(ble, BleUuids.rawImuChar, raw.last);
     _emit(ble, BleUuids.statusChar, status.last);
@@ -723,8 +777,8 @@ void main() {
         points.last.sampledAt.difference(points.first.sampledAt).inMilliseconds,
         80);
     expect(find.textContaining('Rejected ADC packets'), findsNothing);
-    expect(find.text('Firmware: 1.4.0'), findsOneWidget);
-    expect(find.text('Discarded sensor samples: 7'), findsOneWidget);
+    expect(telemetry()?.firmwareVersion, '1.4.0');
+    expect(telemetry()?.bufferDroppedSamples, 7);
     // Even a valid first row of a malformed AUX frame must not be committed.
     final invalid = _batch(3, [0, 20], sequence: 104);
     invalid[invalid.length - 1] = 1; // absent peer slot must remain zero
@@ -749,6 +803,8 @@ void main() {
     await _toggle(tester, 'IMU raw');
     _emit(ble, BleUuids.rawImuChar, partial.last); // cannot resume old partial
     await tester.pump(const Duration(milliseconds: 50));
+    await tester.scrollUntilVisible(find.byType(RawImuChart), 250,
+        scrollable: find.byType(Scrollable).first);
     expect(tester.widget<RawImuChart>(find.byType(RawImuChart)).history,
         hasLength(2));
     _emit(ble, BleUuids.rawImuChar,

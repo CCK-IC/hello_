@@ -12,6 +12,7 @@ import '../models/frequency_history.dart';
 import '../models/frequency_recording_csv.dart';
 import '../models/imu_frequency_analysis.dart';
 import '../models/raw_imu_history.dart';
+import 'device_status_top_bar.dart';
 import 'frequency_history_chart.dart';
 
 /// Analysis preferences that the dashboard retains across page visits.
@@ -39,6 +40,7 @@ class ImuAnalysisPage extends StatefulWidget {
     required this.samples,
     this.adcSamples,
     this.settings,
+    this.deviceStatus,
     this.clock,
     this.saveCsv,
   });
@@ -48,6 +50,7 @@ class ImuAnalysisPage extends StatefulWidget {
 
   /// Pass the same instance when opening a new route to retain its settings.
   final ImuAnalysisSettings? settings;
+  final ValueListenable<DeviceStatusSnapshot>? deviceStatus;
 
   /// Optional clock for deterministic tests.
   final DateTime Function()? clock;
@@ -954,6 +957,7 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
   @override
   Widget build(BuildContext context) {
     final arrival = _lastArrival;
+    final deviceStatus = widget.deviceStatus;
     final now = _now();
     final stale = arrival != null && !_fresh(arrival, now);
     final adcFresh = _fresh(_lastAdcArrival, now);
@@ -971,6 +975,12 @@ class _ImuAnalysisPageState extends State<ImuAnalysisPage> {
           title:
               const Text('IMU frequency analysis', softWrap: true, maxLines: 2),
           toolbarHeight: toolbarHeight,
+          bottom: deviceStatus == null
+              ? null
+              : DeviceStatusTopBar(
+                  listenable: deviceStatus,
+                  textScaler: MediaQuery.textScalerOf(context),
+                ),
         ),
         body: SafeArea(
           top: false,

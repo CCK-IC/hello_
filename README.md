@@ -26,6 +26,8 @@ App **1.2.0+5** displays separate IMU and ADC notification rates. Firmware
 App **1.2.1+6** improves percussion readout consistency, defaults to angular
 velocity, and keeps analysis settings across visits to the dashboard.
 
+App **1.2.2+7** puts live device status in the dashboard and analysis top bars.
+
 ## Run the app
 
 You need a BLE-capable host and a powered sensor running firmware that implements
@@ -74,9 +76,14 @@ received rate and device telemetry.
 
 ## Use the dashboard
 
+The dashboard and analysis top bars show the connection, battery charge, IMU
+state, IMU and ADC sample rates in Hz, and their BLE notification rates in
+packets per second. Open **Details** for firmware, battery voltage, uptime,
+ATT MTU, and drop and recovery counters. Enable **Device status** under
+**BLE subscriptions** to receive device telemetry. Status starts off on Windows.
+
 | Section | What you can do |
 | --- | --- |
-| **Device telemetry** | View IMU state, battery, reported sample and notification rates, uptime, and drop or recovery counters. Enable **Device status** under **BLE subscriptions** if telemetry is off. Status starts off on Windows. |
 | **Raw ICM-20948 Data** | Inspect the latest accelerometer values in g and gyroscope values in °/s, plus their raw counts. Full Raw v1 and batched v3 packets also carry magnetometer and temperature counts. |
 | **Raw data visualization** | Select multiple signals to plot, set the **Chart time window**, and choose how much raw data the **IMU history buffer** retains (1–60 minutes, default 10 minutes). |
 | **ADC auxiliary** | Enable **Auxiliary sensor** under **BLE subscriptions** and select any of the eight channels. The chart shares the raw IMU time window. The buffer is measured in samples (default 6,000). Legacy AUX v1 requires ATT MTU ≥25; v3 supports application fragmentation at smaller MTUs. |
